@@ -1,0 +1,30 @@
+{
+  "animals": [
+    {
+      "name": "Whiskers",
+      "kind": "cat",
+      "position": [
+        10,
+        5
+      ]
+    },
+    {
+      "name": "Buddy",
+      "kind": "dog",
+      "position": [
+        30,
+        10
+      ]
+    },
+    {
+      "name": "Tweety",
+      "kind": "bird",
+      "position": [
+        20,
+        15
+      ]
+    }
+  ],
+  "max_animals": 10,
+  "frame_delay_ms": 100
+}
