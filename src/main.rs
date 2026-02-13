@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 #[derive(Parser)]
-#[command(version, about = "PoCLImon - A terminal-based Pokémon virtual pet")]
+#[command(version, about = "PoCLImon - A terminal-based creature virtual pet")]
 struct Cli {
     /// Path to config file
     #[arg(short, long)]
@@ -33,7 +33,7 @@ struct Cli {
 struct App {
     #[allow(dead_code)]
     config: GameConfig,
-    pokemon_image: Option<StatefulProtocol>,
+    creature_image: Option<StatefulProtocol>,
     sprite_path: Option<PathBuf>,
     running: bool,
 }
@@ -42,7 +42,7 @@ impl App {
     fn new(config: GameConfig) -> Self {
         Self {
             config,
-            pokemon_image: None,
+            creature_image: None,
             sprite_path: None,
             running: true,
         }
@@ -52,23 +52,23 @@ impl App {
         let sprite_dir = dirs_or_default();
         std::fs::create_dir_all(&sprite_dir)?;
 
-        let sprite_path = sprite_dir.join("pikachu.png");
+        let sprite_name = self.config.alias.as_deref().unwrap_or(&self.config.creature_name);
+        let sprite_path = sprite_dir.join(format!("{}.png", sprite_name.to_lowercase()));
 
         // If sprite doesn't exist, try to download it
         if !sprite_path.exists() {
-            eprintln!("Downloading Pikachu sprite...");
-            match sprite::download_sprite(25, &sprite_path) {
+            eprintln!("Downloading sprite for {}...", self.config.creature_name);
+            match sprite::download_sprite(self.config.creature_id, &sprite_path) {
                 Ok(()) => {}
                 Err(e) => {
-                    // Use bundled fallback
                     eprintln!("Download failed ({}), using fallback", e);
-                    sprite::create_fallback_sprite(&sprite_path)?;
+                    sprite::fallback::create_fallback_sprite(&sprite_path)?;
                 }
             }
         }
 
         let dyn_img = image::ImageReader::open(&sprite_path)?.decode()?;
-        self.pokemon_image = Some(picker.new_resize_protocol(dyn_img));
+        self.creature_image = Some(picker.new_resize_protocol(dyn_img));
         self.sprite_path = Some(sprite_path);
         Ok(())
     }
@@ -157,10 +157,11 @@ fn ui(f: &mut Frame<'_>, app: &mut App) {
     .split(f.area());
 
     // Title
+    let display_name = app.config.alias.as_deref().unwrap_or(&app.config.creature_name);
     let title = Paragraph::new(Line::from(vec![
         Span::styled("PoCLImon", Style::default().fg(Color::Yellow)),
         Span::raw(" - "),
-        Span::styled("Pikachu", Style::default().fg(Color::LightYellow)),
+        Span::styled(display_name, Style::default().fg(Color::LightYellow)),
     ]))
     .block(Block::default().borders(Borders::ALL).title("⚡ PoCLImon"));
     f.render_widget(title, chunks[0]);
@@ -168,12 +169,12 @@ fn ui(f: &mut Frame<'_>, app: &mut App) {
     // Sprite area
     let sprite_block = Block::default()
         .borders(Borders::ALL)
-        .title("Pokémon Sprite");
+        .title("Creature Sprite");
 
     let inner = sprite_block.inner(chunks[1]);
     f.render_widget(sprite_block, chunks[1]);
 
-    if let Some(ref mut protocol) = app.pokemon_image {
+    if let Some(ref mut protocol) = app.creature_image {
         // Center the image in the available area
         let img_area = centered_rect(inner, 40, 20);
         let image_widget = StatefulImage::default();

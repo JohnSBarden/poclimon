@@ -14,15 +14,18 @@ pub enum ConfigError {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GameConfig {
-    pub pokemon_id: u32,
-    pub pokemon_name: String,
+    pub creature_id: u32,
+    pub creature_name: String,
+    /// Optional internal alias/codename for this creature
+    pub alias: Option<String>,
 }
 
 impl Default for GameConfig {
     fn default() -> Self {
         Self {
-            pokemon_id: 25,
-            pokemon_name: "Pikachu".to_string(),
+            creature_id: 25,
+            creature_name: "Pikachu".to_string(),
+            alias: None,
         }
     }
 }

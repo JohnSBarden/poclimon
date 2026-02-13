@@ -1,46 +1,11 @@
 use anyhow::Result;
+use image::{Rgba, RgbaImage};
 use std::path::Path;
 
-/// Download a Pokémon sprite from PokeAPI sprites repo.
-/// Uses the "official artwork" PNG which is a clean, high-res image.
-pub fn download_sprite(pokemon_id: u32, dest: &Path) -> Result<()> {
-    // Use official-artwork PNG (475x475, clean)
-    let url = format!(
-        "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/{}.png",
-        pokemon_id
-    );
-
-    // Simple blocking HTTP download using std
-    let output = std::process::Command::new("curl")
-        .args(["-sL", "-o"])
-        .arg(dest.as_os_str())
-        .arg(&url)
-        .output()?;
-
-    if !output.status.success() {
-        anyhow::bail!(
-            "curl failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    // Verify it's actually an image (check file size)
-    let metadata = std::fs::metadata(dest)?;
-    if metadata.len() < 100 {
-        std::fs::remove_file(dest)?;
-        anyhow::bail!("Downloaded file too small, likely failed");
-    }
-
-    Ok(())
-}
-
-/// Create a simple fallback sprite (a yellow square) when download fails.
+/// Create a simple fallback sprite (a yellow circle with features) when download fails.
 pub fn create_fallback_sprite(dest: &Path) -> Result<()> {
-    use image::{Rgba, RgbaImage};
-
     let mut img = RgbaImage::new(96, 96);
 
-    // Draw a simple Pikachu-esque shape (yellow circle with features)
     let yellow = Rgba([255, 220, 50, 255]);
     let black = Rgba([0, 0, 0, 255]);
     let red = Rgba([220, 50, 50, 255]);
