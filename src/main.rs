@@ -104,7 +104,7 @@ impl App {
     }
 
     /// Switch to a different creature from the roster.
-    fn switch_creature(&mut self, index: usize, picker: &mut Picker) {
+    fn switch_creature(&mut self, index: usize, picker: &mut Picker, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
         if index >= creatures::ROSTER.len() {
             return;
         }
@@ -114,23 +114,28 @@ impl App {
         self.config.creature_name = creature.name.to_string();
         self.config.alias = None;
 
+        // Clear the old frame so no ghost artifacts remain
+        self.current_frame = None;
+        // Force a full terminal clear to wipe any image protocol artifacts
+        let _ = terminal.clear();
+
         if let Err(e) = self.load_sprites(picker) {
             eprintln!("Failed to load sprites: {}", e);
         }
     }
 
-    fn next_creature(&mut self, picker: &mut Picker) {
+    fn next_creature(&mut self, picker: &mut Picker, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
         let next = (self.roster_index + 1) % creatures::ROSTER.len();
-        self.switch_creature(next, picker);
+        self.switch_creature(next, picker, terminal);
     }
 
-    fn prev_creature(&mut self, picker: &mut Picker) {
+    fn prev_creature(&mut self, picker: &mut Picker, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
         let prev = if self.roster_index == 0 {
             creatures::ROSTER.len() - 1
         } else {
             self.roster_index - 1
         };
-        self.switch_creature(prev, picker);
+        self.switch_creature(prev, picker, terminal);
     }
 
     /// Update the displayed frame based on current animation state.
@@ -138,7 +143,17 @@ impl App {
         self.animator.tick();
 
         if let Some(frame) = self.animator.render_frame() {
-            self.current_frame = Some(picker.new_resize_protocol(frame.clone()));
+            // Scale up the sprite — PMD sprites are small (32-80px).
+            // Nearest-neighbor scaling preserves pixel art crispness.
+            let (w, h) = (frame.width(), frame.height());
+            let scale = 6u32; // 6x scale: a 40px sprite becomes 240px
+            let scaled = image::imageops::resize(
+                frame,
+                w * scale,
+                h * scale,
+                image::imageops::FilterType::Nearest,
+            );
+            self.current_frame = Some(picker.new_resize_protocol(image::DynamicImage::ImageRgba8(scaled)));
         }
     }
 }
@@ -271,10 +286,10 @@ fn run_app(
                         app.animator.set_state(AnimationState::Idle);
                     }
                     KeyCode::Right | KeyCode::Char('n') | KeyCode::Char('N') => {
-                        app.next_creature(picker);
+                        app.next_creature(picker, terminal);
                     }
                     KeyCode::Left | KeyCode::Char('p') | KeyCode::Char('P') => {
-                        app.prev_creature(picker);
+                        app.prev_creature(picker, terminal);
                     }
                     _ => {}
                 }
@@ -327,7 +342,8 @@ fn ui(f: &mut Frame<'_>, app: &mut App) {
     f.render_widget(sprite_block, chunks[1]);
 
     if let Some(ref mut protocol) = app.current_frame {
-        let img_area = centered_rect(inner, 40, 20);
+        // Use most of the available space — sprites are small pixel art, let them scale up
+        let img_area = centered_rect(inner, inner.width.saturating_sub(4), inner.height.saturating_sub(2));
         let image_widget = StatefulImage::default();
         f.render_stateful_widget(image_widget, img_area, protocol);
     } else {
