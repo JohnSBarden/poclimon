@@ -1,0 +1,11 @@
+# PoCLImon Configuration (example)
+# Copy to ~/.poclimon/config.toml to use as default
+
+[display]
+# Scale multiplier for sprites (default 6)
+scale = 6
+
+[roster]
+# Active creatures to display (max 6)
+# Use Pokemon names (lowercase) or IDs
+creatures = ["pikachu", "eevee", "bulbasaur"]

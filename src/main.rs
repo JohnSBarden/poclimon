@@ -36,124 +36,115 @@ struct Cli {
     #[arg(short, long)]
     config: Option<PathBuf>,
 
-    /// Creature name to start with (e.g., pikachu, bulbasaur, charmander, squirtle, eevee)
+    /// Quick override: show only this creature (by name)
     #[arg(short = 'n', long)]
     creature: Option<String>,
+}
 
-    /// Creature ID to start with
-    #[arg(long)]
-    creature_id: Option<u32>,
+/// A single creature slot in the multi-sprite display.
+struct CreatureSlot {
+    creature_id: u32,
+    creature_name: String,
+    animator: Animator,
+    current_frame: Option<StatefulProtocol>,
 }
 
 struct App {
     config: GameConfig,
-    current_frame: Option<StatefulProtocol>,
+    slots: Vec<CreatureSlot>,
+    selected: usize,
     running: bool,
-    animator: Animator,
-    /// Index into the creature roster for cycling.
-    roster_index: usize,
 }
 
 impl App {
     fn new(config: GameConfig) -> Self {
-        // Find matching roster index
-        let roster_index = creatures::ROSTER
+        let slots: Vec<CreatureSlot> = config
+            .roster
             .iter()
-            .position(|c| c.id == config.creature_id)
-            .unwrap_or(0);
+            .map(|(id, name)| CreatureSlot {
+                creature_id: *id,
+                creature_name: name.clone(),
+                animator: Animator::new(),
+                current_frame: None,
+            })
+            .collect();
 
         Self {
             config,
-            current_frame: None,
+            slots,
+            selected: 0,
             running: true,
-            animator: Animator::new(),
-            roster_index,
         }
     }
 
-    fn display_name(&self) -> &str {
-        self.config
-            .alias
-            .as_deref()
-            .unwrap_or(&self.config.creature_name)
-    }
+    /// Load sprites for all creatures in the roster.
+    fn load_all_sprites(&mut self, picker: &mut Picker) -> Result<()> {
+        for slot in &mut self.slots {
+            eprintln!("Downloading sprites for {}...", slot.creature_name);
 
-    /// Load sprite sheet animations for the current creature.
-    fn load_sprites(&mut self, picker: &mut Picker) -> Result<()> {
-        eprintln!("Downloading sprites for {}...", self.config.creature_name);
+            let (anim_data_path, sheets) =
+                sprite::download_all_sprites(slot.creature_id)?;
 
-        // Download all sprite data
-        let (anim_data_path, sheets) =
-            sprite::download_all_sprites(self.config.creature_id)?;
+            let xml = std::fs::read_to_string(&anim_data_path)?;
+            let anim_infos = anim_data::parse_anim_data(&xml);
 
-        // Parse AnimData.xml
-        let xml = std::fs::read_to_string(&anim_data_path)?;
-        let anim_infos = anim_data::parse_anim_data(&xml);
+            let idle_anim = load_animation("Idle", &sheets, &anim_infos)?;
+            let eat_anim = load_animation("Eat", &sheets, &anim_infos)?;
+            let sleep_anim = load_animation("Sleep", &sheets, &anim_infos)?;
 
-        // Build animations from sprite sheets
-        let idle_anim = load_animation("Idle", &sheets, &anim_infos)?;
-        let eat_anim = load_animation("Eat", &sheets, &anim_infos)?;
-        let sleep_anim = load_animation("Sleep", &sheets, &anim_infos)?;
+            slot.animator = Animator::new();
+            slot.animator.load_animations(idle_anim, eat_anim, sleep_anim);
+        }
 
-        self.animator = Animator::new();
-        self.animator.load_animations(idle_anim, eat_anim, sleep_anim);
-
-        // Render the first frame
-        self.update_display(picker);
+        // Render first frames
+        self.update_all_displays(picker);
         Ok(())
     }
 
-    /// Switch to a different creature from the roster.
-    fn switch_creature(&mut self, index: usize, picker: &mut Picker, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
-        if index >= creatures::ROSTER.len() {
-            return;
-        }
-        self.roster_index = index;
-        let creature = &creatures::ROSTER[index];
-        self.config.creature_id = creature.id;
-        self.config.creature_name = creature.name.to_string();
-        self.config.alias = None;
-
-        // Clear the old frame so no ghost artifacts remain
-        self.current_frame = None;
-        // Force a full terminal clear to wipe any image protocol artifacts
-        let _ = terminal.clear();
-
-        if let Err(e) = self.load_sprites(picker) {
-            eprintln!("Failed to load sprites: {}", e);
+    /// Update all creature displays.
+    fn update_all_displays(&mut self, picker: &mut Picker) {
+        let scale = self.config.scale;
+        for slot in &mut self.slots {
+            slot.animator.tick();
+            if let Some(frame) = slot.animator.render_frame() {
+                let (w, h) = (frame.width(), frame.height());
+                let scaled = image::imageops::resize(
+                    frame,
+                    w * scale,
+                    h * scale,
+                    image::imageops::FilterType::Nearest,
+                );
+                slot.current_frame =
+                    Some(picker.new_resize_protocol(image::DynamicImage::ImageRgba8(scaled)));
+            }
         }
     }
 
-    fn next_creature(&mut self, picker: &mut Picker, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
-        let next = (self.roster_index + 1) % creatures::ROSTER.len();
-        self.switch_creature(next, picker, terminal);
+    fn select_next(&mut self) {
+        if !self.slots.is_empty() {
+            self.selected = (self.selected + 1) % self.slots.len();
+        }
     }
 
-    fn prev_creature(&mut self, picker: &mut Picker, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
-        let prev = if self.roster_index == 0 {
-            creatures::ROSTER.len() - 1
-        } else {
-            self.roster_index - 1
-        };
-        self.switch_creature(prev, picker, terminal);
+    fn select_prev(&mut self) {
+        if !self.slots.is_empty() {
+            self.selected = if self.selected == 0 {
+                self.slots.len() - 1
+            } else {
+                self.selected - 1
+            };
+        }
     }
 
-    /// Update the displayed frame based on current animation state.
-    fn update_display(&mut self, picker: &mut Picker) {
-        self.animator.tick();
+    fn select_slot(&mut self, index: usize) {
+        if index < self.slots.len() {
+            self.selected = index;
+        }
+    }
 
-        if let Some(frame) = self.animator.render_frame() {
-            // Scale up the sprite — PMD sprites are small (32-80px).
-            // Nearest-neighbor scaling preserves pixel art crispness.
-            let (w, h) = (frame.width(), frame.height());
-            let scale = 6u32; // 6x scale: a 40px sprite becomes 240px
-            let scaled = image::imageops::resize(
-                frame,
-                w * scale,
-                h * scale,
-                image::imageops::FilterType::Nearest,
-            );
-            self.current_frame = Some(picker.new_resize_protocol(image::DynamicImage::ImageRgba8(scaled)));
+    fn set_selected_state(&mut self, state: AnimationState) {
+        if let Some(slot) = self.slots.get_mut(self.selected) {
+            slot.animator.set_state(state);
         }
     }
 }
@@ -164,7 +155,6 @@ fn load_animation(
     sheets: &[(String, PathBuf)],
     anim_infos: &HashMap<String, AnimInfo>,
 ) -> Result<Animation> {
-    // Find the sprite sheet for this animation
     let sheet_path = sheets
         .iter()
         .find(|(name, _)| name == anim_name)
@@ -178,7 +168,6 @@ fn load_animation(
             let frames = sprite_sheet::extract_frames(&sheet, info);
 
             if frames.is_empty() {
-                // Fall back to a single-frame placeholder
                 let fallback = sprite::fallback::create_fallback_frame()?;
                 Ok(Animation::new(vec![fallback], &[20]))
             } else {
@@ -186,7 +175,6 @@ fn load_animation(
             }
         }
         _ => {
-            // Animation not available — use a fallback frame
             let fallback = sprite::fallback::create_fallback_frame()?;
             Ok(Animation::new(vec![fallback], &[20]))
         }
@@ -196,35 +184,19 @@ fn load_animation(
 fn main() -> Result<()> {
     let args = Cli::parse();
 
-    let config = if let Some(path) = args.config {
+    let config = if let Some(name) = &args.creature {
+        // Quick override — single creature
+        match GameConfig::from_creature_name(name) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Warning: {} — using default", e);
+                GameConfig::default()
+            }
+        }
+    } else if let Some(path) = args.config {
         GameConfig::load(path)?
-    } else if let Some(name) = &args.creature {
-        if let Some(creature) = creatures::find_by_name(name) {
-            GameConfig {
-                creature_id: creature.id,
-                creature_name: creature.name.to_string(),
-                alias: None,
-            }
-        } else {
-            eprintln!("Unknown creature '{}', using default", name);
-            GameConfig::default()
-        }
-    } else if let Some(id) = args.creature_id {
-        if let Some(creature) = creatures::find_by_id(id) {
-            GameConfig {
-                creature_id: creature.id,
-                creature_name: creature.name.to_string(),
-                alias: None,
-            }
-        } else {
-            GameConfig {
-                creature_id: id,
-                creature_name: format!("Creature #{}", id),
-                alias: None,
-            }
-        }
     } else {
-        GameConfig::default()
+        GameConfig::load_default().unwrap_or_default()
     };
 
     enable_raw_mode()?;
@@ -237,7 +209,7 @@ fn main() -> Result<()> {
 
     let mut app = App::new(config);
 
-    if let Err(e) = app.load_sprites(&mut picker) {
+    if let Err(e) = app.load_all_sprites(&mut picker) {
         eprintln!("Failed to load sprites: {}", e);
     }
 
@@ -259,10 +231,10 @@ fn run_app(
     app: &mut App,
     picker: &mut Picker,
 ) -> Result<()> {
-    let frame_duration = Duration::from_millis(50); // ~20fps render loop
+    let frame_duration = Duration::from_millis(50);
 
     while app.running {
-        app.update_display(picker);
+        app.update_all_displays(picker);
         terminal.draw(|f| ui(f, app))?;
 
         if event::poll(frame_duration)? {
@@ -277,20 +249,22 @@ fn run_app(
                         app.running = false;
                     }
                     KeyCode::Char('e') | KeyCode::Char('E') => {
-                        app.animator.set_state(AnimationState::Eating);
+                        app.set_selected_state(AnimationState::Eating);
                     }
                     KeyCode::Char('s') | KeyCode::Char('S') => {
-                        app.animator.set_state(AnimationState::Sleeping);
+                        app.set_selected_state(AnimationState::Sleeping);
                     }
                     KeyCode::Char('i') | KeyCode::Char('I') => {
-                        app.animator.set_state(AnimationState::Idle);
+                        app.set_selected_state(AnimationState::Idle);
                     }
-                    KeyCode::Right | KeyCode::Char('n') | KeyCode::Char('N') => {
-                        app.next_creature(picker, terminal);
-                    }
-                    KeyCode::Left | KeyCode::Char('p') | KeyCode::Char('P') => {
-                        app.prev_creature(picker, terminal);
-                    }
+                    KeyCode::Right => app.select_next(),
+                    KeyCode::Left => app.select_prev(),
+                    KeyCode::Char('1') => app.select_slot(0),
+                    KeyCode::Char('2') => app.select_slot(1),
+                    KeyCode::Char('3') => app.select_slot(2),
+                    KeyCode::Char('4') => app.select_slot(3),
+                    KeyCode::Char('5') => app.select_slot(4),
+                    KeyCode::Char('6') => app.select_slot(5),
                     _ => {}
                 }
             }
@@ -302,74 +276,182 @@ fn run_app(
 fn ui(f: &mut Frame<'_>, app: &mut App) {
     let chunks = Layout::vertical([
         Constraint::Length(3), // Title bar
-        Constraint::Min(10),  // Sprite area
+        Constraint::Min(10),  // Creature area
         Constraint::Length(3), // Status bar
         Constraint::Length(3), // Help bar
     ])
     .split(f.area());
 
     // Title
-    let display_name = app.display_name();
-    let roster_info = format!(
-        " [{}/{}]",
-        app.roster_index + 1,
-        creatures::ROSTER.len()
-    );
+    let selected_name = app
+        .slots
+        .get(app.selected)
+        .map(|s| s.creature_name.clone())
+        .unwrap_or_else(|| "???".to_string());
     let title = Paragraph::new(Line::from(vec![
         Span::styled("PoCLImon", Style::default().fg(Color::Yellow)),
-        Span::raw(" - "),
-        Span::styled(display_name, Style::default().fg(Color::LightYellow)),
-        Span::styled(&roster_info, Style::default().fg(Color::DarkGray)),
+        Span::raw(" — "),
+        Span::styled(
+            format!("{} creatures", app.slots.len()),
+            Style::default().fg(Color::LightYellow),
+        ),
+        Span::styled(
+            format!(" [selected: {}]", selected_name),
+            Style::default().fg(Color::DarkGray),
+        ),
     ]))
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title("⚡ PoCLImon v0.0.1"),
+            .title("⚡ PoCLImon v0.1.0"),
     );
     f.render_widget(title, chunks[0]);
 
-    // Sprite area
-    let state_label = match app.animator.state() {
-        AnimationState::Idle => "Idle",
-        AnimationState::Eating => "Nomming 🍖",
-        AnimationState::Sleeping => "Sleeping 💤",
-    };
-    let sprite_block = Block::default()
-        .borders(Borders::ALL)
-        .title(format!("Creature Sprite — {}", state_label));
+    // Gather status info before mutable borrow
+    let state_label = app
+        .slots
+        .get(app.selected)
+        .map(|s| match s.animator.state() {
+            AnimationState::Idle => "Idle",
+            AnimationState::Eating => "Nomming 🍖",
+            AnimationState::Sleeping => "Sleeping 💤",
+        })
+        .unwrap_or("—");
+    let status_color = app
+        .slots
+        .get(app.selected)
+        .map(|s| match s.animator.state() {
+            AnimationState::Idle => Color::Green,
+            AnimationState::Eating => Color::Yellow,
+            AnimationState::Sleeping => Color::Blue,
+        })
+        .unwrap_or(Color::White);
 
-    let inner = sprite_block.inner(chunks[1]);
-    f.render_widget(sprite_block, chunks[1]);
-
-    if let Some(ref mut protocol) = app.current_frame {
-        // Use most of the available space — sprites are small pixel art, let them scale up
-        let img_area = centered_rect(inner, inner.width.saturating_sub(4), inner.height.saturating_sub(2));
-        let image_widget = StatefulImage::default();
-        f.render_stateful_widget(image_widget, img_area, protocol);
-    } else {
-        let fallback = Paragraph::new("No sprite loaded. Check ~/.poclimon/sprites/")
-            .style(Style::default().fg(Color::Red));
-        f.render_widget(fallback, inner);
-    }
-
-    // Status bar
-    let status_color = match app.animator.state() {
-        AnimationState::Idle => Color::Green,
-        AnimationState::Eating => Color::Yellow,
-        AnimationState::Sleeping => Color::Blue,
-    };
+    // Creature area — layout depends on count
+    render_creature_grid(f, chunks[1], app);
     let status = Paragraph::new(Line::from(vec![
-        Span::raw("State: "),
+        Span::raw(format!("{}: ", &selected_name)),
         Span::styled(state_label, Style::default().fg(status_color)),
     ]))
     .block(Block::default().borders(Borders::ALL));
     f.render_widget(status, chunks[2]);
 
     // Help bar
-    let help = Paragraph::new("[E]at  [S]leep  [I]dle  [←/P]rev  [→/N]ext  [Q]uit")
+    let help = Paragraph::new("[E]at  [S]leep  [I]dle  [←/→]Select  [1-6]Slot  [Q]uit")
         .style(Style::default().fg(Color::DarkGray))
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(help, chunks[3]);
+}
+
+/// Render the creature grid based on how many creatures are active.
+fn render_creature_grid(f: &mut Frame<'_>, area: Rect, app: &mut App) {
+    let count = app.slots.len();
+    if count == 0 {
+        return;
+    }
+
+    match count {
+        1 => {
+            render_creature_slot(f, area, &mut app.slots[0], app.selected == 0);
+        }
+        2 => {
+            let cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(area);
+            for (i, col) in cols.iter().enumerate() {
+                if let Some(slot) = app.slots.get_mut(i) {
+                    render_creature_slot(f, *col, slot, app.selected == i);
+                }
+            }
+        }
+        3 => {
+            let cols = Layout::horizontal([
+                Constraint::Percentage(33),
+                Constraint::Percentage(34),
+                Constraint::Percentage(33),
+            ])
+            .split(area);
+            for (i, col) in cols.iter().enumerate() {
+                if let Some(slot) = app.slots.get_mut(i) {
+                    render_creature_slot(f, *col, slot, app.selected == i);
+                }
+            }
+        }
+        4..=6 => {
+            // 2 rows: top row gets ceil(count/2), bottom gets the rest
+            let top_count = (count + 1) / 2;
+            let bot_count = count - top_count;
+            let rows = Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(area);
+
+            // Top row
+            let top_constraints: Vec<Constraint> = (0..top_count)
+                .map(|_| Constraint::Ratio(1, top_count as u32))
+                .collect();
+            let top_cols = Layout::horizontal(top_constraints).split(rows[0]);
+            for (i, col) in top_cols.iter().enumerate() {
+                if let Some(slot) = app.slots.get_mut(i) {
+                    render_creature_slot(f, *col, slot, app.selected == i);
+                }
+            }
+
+            // Bottom row
+            if bot_count > 0 {
+                let bot_constraints: Vec<Constraint> = (0..bot_count)
+                    .map(|_| Constraint::Ratio(1, bot_count as u32))
+                    .collect();
+                let bot_cols = Layout::horizontal(bot_constraints).split(rows[1]);
+                for (i, col) in bot_cols.iter().enumerate() {
+                    let idx = top_count + i;
+                    if let Some(slot) = app.slots.get_mut(idx) {
+                        render_creature_slot(f, *col, slot, app.selected == idx);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Render a single creature slot.
+fn render_creature_slot(
+    f: &mut Frame<'_>,
+    area: Rect,
+    slot: &mut CreatureSlot,
+    selected: bool,
+) {
+    let border_color = if selected {
+        Color::Yellow
+    } else {
+        Color::DarkGray
+    };
+
+    let state_icon = match slot.animator.state() {
+        AnimationState::Idle => "",
+        AnimationState::Eating => " 🍖",
+        AnimationState::Sleeping => " 💤",
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color))
+        .title(format!("{}{}", slot.creature_name, state_icon));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if let Some(ref mut protocol) = slot.current_frame {
+        let img_area = centered_rect(
+            inner,
+            inner.width.saturating_sub(2),
+            inner.height.saturating_sub(1),
+        );
+        let image_widget = StatefulImage::default();
+        f.render_stateful_widget(image_widget, img_area, protocol);
+    } else {
+        let fallback = Paragraph::new("Loading...")
+            .style(Style::default().fg(Color::DarkGray));
+        f.render_widget(fallback, inner);
+    }
 }
 
 fn centered_rect(area: Rect, max_width: u16, max_height: u16) -> Rect {
