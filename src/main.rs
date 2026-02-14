@@ -1,6 +1,7 @@
 mod animation;
 mod config;
 mod creatures;
+mod eyes;
 mod sprite;
 
 use animation::{AnimationState, Animator};
@@ -97,7 +98,7 @@ impl App {
 
         let dyn_img = image::ImageReader::open(&sprite_path)?.decode()?;
         self.current_frame = Some(picker.new_resize_protocol(dyn_img.clone()));
-        self.animator.detect_eyes(&dyn_img);
+        self.animator.load_eyes(self.config.creature_id);
         self.base_image = Some(dyn_img);
         Ok(())
     }
@@ -223,8 +224,10 @@ fn run_app(
     app: &mut App,
     picker: &mut Picker,
 ) -> Result<()> {
+    // Fixed render rate — animation timing is handled internally by elapsed time
+    let frame_duration = Duration::from_millis(50); // ~20fps render loop
+
     while app.running {
-        let frame_duration = Duration::from_millis(app.animator.frame_rate_ms());
         app.update_animation(picker);
         terminal.draw(|f| ui(f, app))?;
 

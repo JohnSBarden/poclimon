@@ -3,6 +3,14 @@ name = "poclimon"
 version = "0.0.1"
 edition = "2024"
 
+[[bin]]
+name = "poclimon"
+path = "src/main.rs"
+
+[lib]
+name = "poclimon"
+path = "src/lib.rs"
+
 [dependencies]
 crossterm = { version = "0.28", features = ["event-stream"] }
 serde = { version = "1.0", features = ["derive"] }

@@ -1,3 +1,4 @@
+use crate::eyes::EyeRegion;
 use image::{DynamicImage, GenericImageView, Rgba, RgbaImage};
 use std::time::{Duration, Instant};
 
@@ -46,14 +47,6 @@ pub struct Animator {
     eyes_detected: bool,
 }
 
-/// A detected eye region (cluster of dark pixels in the upper portion of the sprite).
-#[derive(Debug, Clone)]
-struct EyeRegion {
-    cx: u32,
-    cy: u32,
-    radius: u32,
-}
-
 impl Animator {
     pub fn new() -> Self {
         let now = Instant::now();
@@ -68,9 +61,9 @@ impl Animator {
         }
     }
 
-    /// Detect eyes from the base sprite. Call once after loading.
-    pub fn detect_eyes(&mut self, base: &DynamicImage) {
-        self.eye_regions = detect_eye_regions(base);
+    /// Load eye positions for the given creature ID.
+    pub fn load_eyes(&mut self, creature_id: u32) {
+        self.eye_regions = crate::eyes::get_eye_regions(creature_id);
         self.eyes_detected = true;
     }
 
@@ -114,15 +107,6 @@ impl Animator {
         false
     }
 
-    /// Returns the frame rate for the current state in milliseconds.
-    pub fn frame_rate_ms(&self) -> u64 {
-        match self.state {
-            AnimationState::Idle => 80,
-            AnimationState::Eating => 50, // ~20fps — fast but smooth
-            AnimationState::Sleeping => 100,
-        }
-    }
-
     pub fn render_frame(&self, base: &DynamicImage) -> DynamicImage {
         let elapsed = Instant::now()
             .duration_since(self.start_time)
@@ -146,136 +130,6 @@ impl Animator {
             IdleVariant::Sway => sway_effect(base, variant_elapsed),
         }
     }
-}
-
-// --- Eye Detection ---
-
-/// Detect dark pixel clusters in the upper portion of the sprite as probable eyes.
-/// Returns up to 2 eye regions (left and right).
-///
-/// Strategy: scan the upper 15–55% of the sprite bounding box for the darkest
-/// pixel clusters. Instead of a fixed brightness cutoff, we adaptively find
-/// pixels that are significantly darker than their local neighborhood, which
-/// works across different sprite color palettes.
-fn detect_eye_regions(base: &DynamicImage) -> Vec<EyeRegion> {
-    let (w, h) = base.dimensions();
-    let rgba = base.to_rgba8();
-
-    // Find the bounding box of non-transparent pixels
-    let mut min_y = h;
-    let mut max_y = 0u32;
-    let mut min_x = w;
-    let mut max_x = 0u32;
-
-    for y in 0..h {
-        for x in 0..w {
-            if rgba.get_pixel(x, y)[3] > 128 {
-                min_y = min_y.min(y);
-                max_y = max_y.max(y);
-                min_x = min_x.min(x);
-                max_x = max_x.max(x);
-            }
-        }
-    }
-
-    if max_y <= min_y || max_x <= min_x {
-        return Vec::new();
-    }
-
-    let sprite_h = max_y - min_y;
-    let sprite_w = max_x - min_x;
-    let sprite_cx = (min_x + max_x) / 2;
-
-    // Search the upper 15–55% band — wider range to catch different sprite styles
-    let search_top = min_y + sprite_h * 15 / 100;
-    let search_bottom = min_y + sprite_h * 55 / 100;
-
-    // First pass: collect all opaque pixel brightnesses in the search band
-    let mut pixels_with_brightness: Vec<(u32, u32, u32)> = Vec::new();
-    for y in search_top..search_bottom {
-        for x in min_x..=max_x {
-            let px = rgba.get_pixel(x, y);
-            if px[3] > 128 {
-                let brightness = px[0] as u32 + px[1] as u32 + px[2] as u32;
-                pixels_with_brightness.push((x, y, brightness));
-            }
-        }
-    }
-
-    if pixels_with_brightness.is_empty() {
-        return Vec::new();
-    }
-
-    // Find the adaptive threshold: take the darkest 8% of pixels in the search band
-    let mut brightnesses: Vec<u32> = pixels_with_brightness.iter().map(|p| p.2).collect();
-    brightnesses.sort();
-    let dark_threshold_idx = (brightnesses.len() as f64 * 0.08).max(1.0) as usize;
-    let dark_threshold = brightnesses[dark_threshold_idx.min(brightnesses.len() - 1)];
-    // Cap at 200 so we don't pick up medium-toned pixels on very bright sprites
-    let dark_threshold = dark_threshold.min(200);
-
-    let dark_pixels: Vec<(u32, u32)> = pixels_with_brightness
-        .iter()
-        .filter(|(_, _, b)| *b <= dark_threshold)
-        .map(|(x, y, _)| (*x, *y))
-        .collect();
-
-    if dark_pixels.len() < 4 {
-        return Vec::new();
-    }
-
-    // Split into left and right halves
-    let left: Vec<_> = dark_pixels.iter().filter(|(x, _)| *x < sprite_cx).collect();
-    let right: Vec<_> = dark_pixels.iter().filter(|(x, _)| *x >= sprite_cx).collect();
-
-    let mut eyes = Vec::new();
-
-    for cluster in [&left, &right] {
-        if cluster.len() < 2 {
-            continue;
-        }
-
-        let avg_x = cluster.iter().map(|(x, _)| *x as f64).sum::<f64>() / cluster.len() as f64;
-        let avg_y = cluster.iter().map(|(_, y)| *y as f64).sum::<f64>() / cluster.len() as f64;
-
-        // Filter out outliers: only keep pixels within a reasonable distance of the centroid
-        let max_eye_size = (sprite_w as f64 * 0.15).max(5.0);
-        let filtered: Vec<_> = cluster
-            .iter()
-            .filter(|(x, y)| {
-                let dx = *x as f64 - avg_x;
-                let dy = *y as f64 - avg_y;
-                (dx * dx + dy * dy).sqrt() < max_eye_size
-            })
-            .collect();
-
-        if filtered.len() < 2 {
-            continue;
-        }
-
-        // Recompute centroid from filtered cluster
-        let cx = filtered.iter().map(|(x, _)| *x as f64).sum::<f64>() / filtered.len() as f64;
-        let cy = filtered.iter().map(|(_, y)| *y as f64).sum::<f64>() / filtered.len() as f64;
-
-        let max_dist = filtered
-            .iter()
-            .map(|(x, y)| {
-                let dx = *x as f64 - cx;
-                let dy = *y as f64 - cy;
-                (dx * dx + dy * dy).sqrt()
-            })
-            .fold(0.0f64, f64::max);
-
-        let radius = (max_dist as u32).max(3).min(25);
-
-        eyes.push(EyeRegion {
-            cx: cx as u32,
-            cy: cy as u32,
-            radius,
-        });
-    }
-
-    eyes
 }
 
 // --- Animation Effects ---
@@ -721,20 +575,9 @@ mod tests {
     }
 
     #[test]
-    fn test_eye_detection() {
-        let base = test_sprite();
-        let eyes = detect_eye_regions(&base);
-        assert_eq!(eyes.len(), 2, "Should detect 2 eyes");
-        // Left eye should be left of center
-        assert!(eyes[0].cx < 48 || eyes[1].cx < 48);
-        // Right eye should be right of center
-        assert!(eyes[0].cx >= 48 || eyes[1].cx >= 48);
-    }
-
-    #[test]
     fn test_sleeping_with_eyes() {
         let base = test_sprite();
-        let eyes = detect_eye_regions(&base);
+        let eyes = crate::eyes::get_eye_regions(25); // Pikachu
         let frame = sleeping_effect(&base, 1.0, &eyes);
         assert_eq!(frame.dimensions(), base.dimensions());
     }
@@ -748,18 +591,6 @@ mod tests {
         // Check that some pixels outside the original sprite area have content (crumbs)
         // Verify frame was produced without crashing
         assert_eq!(frame_rgba.width(), 96);
-    }
-
-    #[test]
-    fn test_frame_rate_varies_by_state() {
-        let mut animator = Animator::new();
-        assert_eq!(animator.frame_rate_ms(), 80);
-
-        animator.set_state(AnimationState::Eating);
-        assert_eq!(animator.frame_rate_ms(), 50);
-
-        animator.set_state(AnimationState::Sleeping);
-        assert_eq!(animator.frame_rate_ms(), 100);
     }
 
     #[test]
