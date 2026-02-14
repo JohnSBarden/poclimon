@@ -1,8 +1,12 @@
+mod anim_data;
 mod animation;
 mod config;
+mod creatures;
 mod sprite;
+mod sprite_sheet;
 
-use animation::{AnimationState, Animator};
+use anim_data::AnimInfo;
+use animation::{Animation, AnimationState, Animator};
 use anyhow::Result;
 use clap::Parser;
 use config::GameConfig;
@@ -11,7 +15,6 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use image::DynamicImage;
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Layout, Rect},
@@ -21,6 +24,7 @@ use ratatui::{
     Frame, Terminal,
 };
 use ratatui_image::{picker::Picker, protocol::StatefulProtocol, StatefulImage};
+use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -31,86 +35,181 @@ struct Cli {
     /// Path to config file
     #[arg(short, long)]
     config: Option<PathBuf>,
+
+    /// Creature name to start with (e.g., pikachu, bulbasaur, charmander, squirtle, eevee)
+    #[arg(short = 'n', long)]
+    creature: Option<String>,
+
+    /// Creature ID to start with
+    #[arg(long)]
+    creature_id: Option<u32>,
 }
 
 struct App {
-    #[allow(dead_code)]
     config: GameConfig,
-    /// The base (unmodified) sprite image for animation transforms.
-    base_image: Option<DynamicImage>,
-    /// The current rendered frame for display.
     current_frame: Option<StatefulProtocol>,
     running: bool,
     animator: Animator,
+    /// Index into the creature roster for cycling.
+    roster_index: usize,
 }
 
 impl App {
     fn new(config: GameConfig) -> Self {
+        // Find matching roster index
+        let roster_index = creatures::ROSTER
+            .iter()
+            .position(|c| c.id == config.creature_id)
+            .unwrap_or(0);
+
         Self {
             config,
-            base_image: None,
             current_frame: None,
             running: true,
             animator: Animator::new(),
+            roster_index,
         }
     }
 
     fn display_name(&self) -> &str {
-        self.config.alias.as_deref().unwrap_or(&self.config.creature_name)
+        self.config
+            .alias
+            .as_deref()
+            .unwrap_or(&self.config.creature_name)
     }
 
-    fn load_sprite(&mut self, picker: &mut Picker) -> Result<()> {
-        let sprite_dir = dirs_or_default();
-        std::fs::create_dir_all(&sprite_dir)?;
+    /// Load sprite sheet animations for the current creature.
+    fn load_sprites(&mut self, picker: &mut Picker) -> Result<()> {
+        eprintln!("Downloading sprites for {}...", self.config.creature_name);
 
-        let sprite_name = self.display_name();
-        let sprite_path = sprite_dir.join(format!("{}.png", sprite_name.to_lowercase()));
+        // Download all sprite data
+        let (anim_data_path, sheets) =
+            sprite::download_all_sprites(self.config.creature_id)?;
 
-        if !sprite_path.exists() {
-            eprintln!("Downloading sprite for {}...", self.config.creature_name);
-            match sprite::download_sprite(self.config.creature_id, &sprite_path) {
-                Ok(()) => {}
-                Err(e) => {
-                    eprintln!("Download failed ({}), using fallback", e);
-                    sprite::fallback::create_fallback_sprite(&sprite_path)?;
-                }
-            }
-        }
+        // Parse AnimData.xml
+        let xml = std::fs::read_to_string(&anim_data_path)?;
+        let anim_infos = anim_data::parse_anim_data(&xml);
 
-        let dyn_img = image::ImageReader::open(&sprite_path)?.decode()?;
-        self.current_frame = Some(picker.new_resize_protocol(dyn_img.clone()));
-        self.base_image = Some(dyn_img);
+        // Build animations from sprite sheets
+        let idle_anim = load_animation("Idle", &sheets, &anim_infos)?;
+        let eat_anim = load_animation("Eat", &sheets, &anim_infos)?;
+        let sleep_anim = load_animation("Sleep", &sheets, &anim_infos)?;
+
+        self.animator = Animator::new();
+        self.animator.load_animations(idle_anim, eat_anim, sleep_anim);
+
+        // Render the first frame
+        self.update_display(picker);
         Ok(())
     }
 
-    /// Update animation and re-render the current frame.
-    fn update_animation(&mut self, picker: &mut Picker) {
+    /// Switch to a different creature from the roster.
+    fn switch_creature(&mut self, index: usize, picker: &mut Picker) {
+        if index >= creatures::ROSTER.len() {
+            return;
+        }
+        self.roster_index = index;
+        let creature = &creatures::ROSTER[index];
+        self.config.creature_id = creature.id;
+        self.config.creature_name = creature.name.to_string();
+        self.config.alias = None;
+
+        if let Err(e) = self.load_sprites(picker) {
+            eprintln!("Failed to load sprites: {}", e);
+        }
+    }
+
+    fn next_creature(&mut self, picker: &mut Picker) {
+        let next = (self.roster_index + 1) % creatures::ROSTER.len();
+        self.switch_creature(next, picker);
+    }
+
+    fn prev_creature(&mut self, picker: &mut Picker) {
+        let prev = if self.roster_index == 0 {
+            creatures::ROSTER.len() - 1
+        } else {
+            self.roster_index - 1
+        };
+        self.switch_creature(prev, picker);
+    }
+
+    /// Update the displayed frame based on current animation state.
+    fn update_display(&mut self, picker: &mut Picker) {
         self.animator.tick();
 
-        if let Some(ref base) = self.base_image {
-            let frame = self.animator.render_frame(base);
-            self.current_frame = Some(picker.new_resize_protocol(frame));
+        if let Some(frame) = self.animator.render_frame() {
+            self.current_frame = Some(picker.new_resize_protocol(frame.clone()));
         }
     }
 }
 
-fn dirs_or_default() -> PathBuf {
-    dirs_path().unwrap_or_else(|| PathBuf::from(".poclimon/sprites"))
-}
+/// Load an Animation from downloaded sprite sheets and parsed AnimData.
+fn load_animation(
+    anim_name: &str,
+    sheets: &[(String, PathBuf)],
+    anim_infos: &HashMap<String, AnimInfo>,
+) -> Result<Animation> {
+    // Find the sprite sheet for this animation
+    let sheet_path = sheets
+        .iter()
+        .find(|(name, _)| name == anim_name)
+        .map(|(_, path)| path);
 
-fn dirs_path() -> Option<PathBuf> {
-    home_dir().map(|h| h.join(".poclimon").join("sprites"))
-}
+    let anim_info = anim_infos.get(anim_name);
 
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    match (sheet_path, anim_info) {
+        (Some(path), Some(info)) => {
+            let sheet = image::ImageReader::open(path)?.decode()?;
+            let frames = sprite_sheet::extract_frames(&sheet, info);
+
+            if frames.is_empty() {
+                // Fall back to a single-frame placeholder
+                let fallback = sprite::fallback::create_fallback_frame()?;
+                Ok(Animation::new(vec![fallback], &[20]))
+            } else {
+                Ok(Animation::new(frames, &info.durations))
+            }
+        }
+        _ => {
+            // Animation not available — use a fallback frame
+            let fallback = sprite::fallback::create_fallback_frame()?;
+            Ok(Animation::new(vec![fallback], &[20]))
+        }
+    }
 }
 
 fn main() -> Result<()> {
     let args = Cli::parse();
-    let config = match args.config {
-        Some(path) => GameConfig::load(path)?,
-        None => GameConfig::default(),
+
+    let config = if let Some(path) = args.config {
+        GameConfig::load(path)?
+    } else if let Some(name) = &args.creature {
+        if let Some(creature) = creatures::find_by_name(name) {
+            GameConfig {
+                creature_id: creature.id,
+                creature_name: creature.name.to_string(),
+                alias: None,
+            }
+        } else {
+            eprintln!("Unknown creature '{}', using default", name);
+            GameConfig::default()
+        }
+    } else if let Some(id) = args.creature_id {
+        if let Some(creature) = creatures::find_by_id(id) {
+            GameConfig {
+                creature_id: creature.id,
+                creature_name: creature.name.to_string(),
+                alias: None,
+            }
+        } else {
+            GameConfig {
+                creature_id: id,
+                creature_name: format!("Creature #{}", id),
+                alias: None,
+            }
+        }
+    } else {
+        GameConfig::default()
     };
 
     enable_raw_mode()?;
@@ -119,14 +218,12 @@ fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| {
-        Picker::from_fontsize((8, 16))
-    });
+    let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::from_fontsize((8, 16)));
 
     let mut app = App::new(config);
 
-    if let Err(e) = app.load_sprite(&mut picker) {
-        eprintln!("Failed to load sprite: {}", e);
+    if let Err(e) = app.load_sprites(&mut picker) {
+        eprintln!("Failed to load sprites: {}", e);
     }
 
     let res = run_app(&mut terminal, &mut app, &mut picker);
@@ -147,14 +244,19 @@ fn run_app(
     app: &mut App,
     picker: &mut Picker,
 ) -> Result<()> {
-    let frame_duration = Duration::from_millis(100);
+    let frame_duration = Duration::from_millis(50); // ~20fps render loop
 
     while app.running {
-        app.update_animation(picker);
+        app.update_display(picker);
         terminal.draw(|f| ui(f, app))?;
 
         if event::poll(frame_duration)? {
-            if let Event::Key(KeyEvent { code, kind: KeyEventKind::Press, .. }) = event::read()? {
+            if let Event::Key(KeyEvent {
+                code,
+                kind: KeyEventKind::Press,
+                ..
+            }) = event::read()?
+            {
                 match code {
                     KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
                         app.running = false;
@@ -168,6 +270,12 @@ fn run_app(
                     KeyCode::Char('i') | KeyCode::Char('I') => {
                         app.animator.set_state(AnimationState::Idle);
                     }
+                    KeyCode::Right | KeyCode::Char('n') | KeyCode::Char('N') => {
+                        app.next_creature(picker);
+                    }
+                    KeyCode::Left | KeyCode::Char('p') | KeyCode::Char('P') => {
+                        app.prev_creature(picker);
+                    }
                     _ => {}
                 }
             }
@@ -178,8 +286,8 @@ fn run_app(
 
 fn ui(f: &mut Frame<'_>, app: &mut App) {
     let chunks = Layout::vertical([
-        Constraint::Length(3),  // Title bar
-        Constraint::Min(10),   // Sprite area
+        Constraint::Length(3), // Title bar
+        Constraint::Min(10),  // Sprite area
         Constraint::Length(3), // Status bar
         Constraint::Length(3), // Help bar
     ])
@@ -187,18 +295,28 @@ fn ui(f: &mut Frame<'_>, app: &mut App) {
 
     // Title
     let display_name = app.display_name();
+    let roster_info = format!(
+        " [{}/{}]",
+        app.roster_index + 1,
+        creatures::ROSTER.len()
+    );
     let title = Paragraph::new(Line::from(vec![
         Span::styled("PoCLImon", Style::default().fg(Color::Yellow)),
         Span::raw(" - "),
         Span::styled(display_name, Style::default().fg(Color::LightYellow)),
+        Span::styled(&roster_info, Style::default().fg(Color::DarkGray)),
     ]))
-    .block(Block::default().borders(Borders::ALL).title("⚡ PoCLImon"));
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("⚡ PoCLImon v0.0.1"),
+    );
     f.render_widget(title, chunks[0]);
 
     // Sprite area
     let state_label = match app.animator.state() {
         AnimationState::Idle => "Idle",
-        AnimationState::Eating => "Eating",
+        AnimationState::Eating => "Nomming 🍖",
         AnimationState::Sleeping => "Sleeping 💤",
     };
     let sprite_block = Block::default()
@@ -232,7 +350,7 @@ fn ui(f: &mut Frame<'_>, app: &mut App) {
     f.render_widget(status, chunks[2]);
 
     // Help bar
-    let help = Paragraph::new("[E]at  [S]leep  [I]dle  [Q]uit")
+    let help = Paragraph::new("[E]at  [S]leep  [I]dle  [←/P]rev  [→/N]ext  [Q]uit")
         .style(Style::default().fg(Color::DarkGray))
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(help, chunks[3]);
