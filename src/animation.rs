@@ -117,9 +117,9 @@ impl Animator {
     /// Returns the frame rate for the current state in milliseconds.
     pub fn frame_rate_ms(&self) -> u64 {
         match self.state {
-            AnimationState::Idle => 100,
-            AnimationState::Eating => 33, // ~30fps for snappy eating
-            AnimationState::Sleeping => 150, // Slower, dreamy
+            AnimationState::Idle => 80,
+            AnimationState::Eating => 50, // ~20fps — fast but smooth
+            AnimationState::Sleeping => 100,
         }
     }
 
@@ -150,8 +150,13 @@ impl Animator {
 
 // --- Eye Detection ---
 
-/// Detect dark pixel clusters in the upper 40% of the sprite as probable eyes.
+/// Detect dark pixel clusters in the upper portion of the sprite as probable eyes.
 /// Returns up to 2 eye regions (left and right).
+///
+/// Strategy: scan the upper 15–55% of the sprite bounding box for the darkest
+/// pixel clusters. Instead of a fixed brightness cutoff, we adaptively find
+/// pixels that are significantly darker than their local neighborhood, which
+/// works across different sprite color palettes.
 fn detect_eye_regions(base: &DynamicImage) -> Vec<EyeRegion> {
     let (w, h) = base.dimensions();
     let rgba = base.to_rgba8();
@@ -164,8 +169,7 @@ fn detect_eye_regions(base: &DynamicImage) -> Vec<EyeRegion> {
 
     for y in 0..h {
         for x in 0..w {
-            let px = rgba.get_pixel(x, y);
-            if px[3] > 128 {
+            if rgba.get_pixel(x, y)[3] > 128 {
                 min_y = min_y.min(y);
                 max_y = max_y.max(y);
                 min_x = min_x.min(x);
@@ -179,59 +183,94 @@ fn detect_eye_regions(base: &DynamicImage) -> Vec<EyeRegion> {
     }
 
     let sprite_h = max_y - min_y;
+    let sprite_w = max_x - min_x;
     let sprite_cx = (min_x + max_x) / 2;
 
-    // Search the upper 25-45% band of the sprite for dark pixels
-    let search_top = min_y + sprite_h * 25 / 100;
-    let search_bottom = min_y + sprite_h * 45 / 100;
+    // Search the upper 15–55% band — wider range to catch different sprite styles
+    let search_top = min_y + sprite_h * 15 / 100;
+    let search_bottom = min_y + sprite_h * 55 / 100;
 
-    // Collect dark, non-transparent pixels in the search band
-    let mut dark_pixels: Vec<(u32, u32)> = Vec::new();
+    // First pass: collect all opaque pixel brightnesses in the search band
+    let mut pixels_with_brightness: Vec<(u32, u32, u32)> = Vec::new();
     for y in search_top..search_bottom {
         for x in min_x..=max_x {
             let px = rgba.get_pixel(x, y);
             if px[3] > 128 {
                 let brightness = px[0] as u32 + px[1] as u32 + px[2] as u32;
-                // Dark pixels (eyes tend to be very dark)
-                if brightness < 150 {
-                    dark_pixels.push((x, y));
-                }
+                pixels_with_brightness.push((x, y, brightness));
             }
         }
     }
 
-    if dark_pixels.is_empty() {
+    if pixels_with_brightness.is_empty() {
         return Vec::new();
     }
 
-    // Split into left and right clusters relative to sprite center
+    // Find the adaptive threshold: take the darkest 8% of pixels in the search band
+    let mut brightnesses: Vec<u32> = pixels_with_brightness.iter().map(|p| p.2).collect();
+    brightnesses.sort();
+    let dark_threshold_idx = (brightnesses.len() as f64 * 0.08).max(1.0) as usize;
+    let dark_threshold = brightnesses[dark_threshold_idx.min(brightnesses.len() - 1)];
+    // Cap at 200 so we don't pick up medium-toned pixels on very bright sprites
+    let dark_threshold = dark_threshold.min(200);
+
+    let dark_pixels: Vec<(u32, u32)> = pixels_with_brightness
+        .iter()
+        .filter(|(_, _, b)| *b <= dark_threshold)
+        .map(|(x, y, _)| (*x, *y))
+        .collect();
+
+    if dark_pixels.len() < 4 {
+        return Vec::new();
+    }
+
+    // Split into left and right halves
     let left: Vec<_> = dark_pixels.iter().filter(|(x, _)| *x < sprite_cx).collect();
     let right: Vec<_> = dark_pixels.iter().filter(|(x, _)| *x >= sprite_cx).collect();
 
     let mut eyes = Vec::new();
 
     for cluster in [&left, &right] {
-        if cluster.len() < 3 {
-            continue; // Too few pixels to be an eye
+        if cluster.len() < 2 {
+            continue;
         }
 
         let avg_x = cluster.iter().map(|(x, _)| *x as f64).sum::<f64>() / cluster.len() as f64;
         let avg_y = cluster.iter().map(|(_, y)| *y as f64).sum::<f64>() / cluster.len() as f64;
 
-        // Estimate radius from the cluster spread
-        let max_dist = cluster.iter()
-            .map(|(x, y)| {
+        // Filter out outliers: only keep pixels within a reasonable distance of the centroid
+        let max_eye_size = (sprite_w as f64 * 0.15).max(5.0);
+        let filtered: Vec<_> = cluster
+            .iter()
+            .filter(|(x, y)| {
                 let dx = *x as f64 - avg_x;
                 let dy = *y as f64 - avg_y;
+                (dx * dx + dy * dy).sqrt() < max_eye_size
+            })
+            .collect();
+
+        if filtered.len() < 2 {
+            continue;
+        }
+
+        // Recompute centroid from filtered cluster
+        let cx = filtered.iter().map(|(x, _)| *x as f64).sum::<f64>() / filtered.len() as f64;
+        let cy = filtered.iter().map(|(_, y)| *y as f64).sum::<f64>() / filtered.len() as f64;
+
+        let max_dist = filtered
+            .iter()
+            .map(|(x, y)| {
+                let dx = *x as f64 - cx;
+                let dy = *y as f64 - cy;
                 (dx * dx + dy * dy).sqrt()
             })
             .fold(0.0f64, f64::max);
 
-        let radius = (max_dist as u32).max(2).min(20);
+        let radius = (max_dist as u32).max(3).min(25);
 
         eyes.push(EyeRegion {
-            cx: avg_x as u32,
-            cy: avg_y as u32,
+            cx: cx as u32,
+            cy: cy as u32,
             radius,
         });
     }
@@ -310,14 +349,20 @@ fn eating_effect(base: &DynamicImage, t: f64) -> DynamicImage {
     let (w, h) = base.dimensions();
     let mut out = RgbaImage::new(w, h);
 
-    // Fast, aggressive chomp — higher frequency and amplitude
-    let chomp_phase = (t * 12.0 * std::f64::consts::PI).sin();
-    let chomp = chomp_phase.abs() * 0.12;
+    // Smooth chomp cycle: use a power curve for snappy down + gentle up
+    let cycle = (t * 4.0) % 1.0; // 4 chomps per second
+    let chomp = if cycle < 0.3 {
+        // Quick squash down
+        (cycle / 0.3).powi(2) * 0.10
+    } else {
+        // Gentle release back up
+        ((1.0 - cycle) / 0.7).powi(2) * 0.10
+    };
     let scale_y = 1.0 - chomp;
-    let scale_x = 1.0 + chomp * 0.6;
+    let scale_x = 1.0 + chomp * 0.5;
 
-    // Slight forward tilt during chomps
-    let tilt = chomp_phase.max(0.0) * 0.02;
+    // Slight forward lean on the down-chomp
+    let tilt = if cycle < 0.3 { chomp * 0.15 } else { 0.0 };
 
     let cx = w as f64 / 2.0;
     let cy = h as f64;
@@ -470,83 +515,110 @@ fn sleeping_effect(base: &DynamicImage, t: f64, eye_regions: &[EyeRegion]) -> Dy
     DynamicImage::ImageRgba8(out)
 }
 
+/// Draw a glyph (2D array of 0/1) scaled up onto the image.
+fn draw_glyph_scaled<const W: usize, const H: usize>(
+    img: &mut RgbaImage,
+    glyph: &[[u8; W]; H],
+    x: i32,
+    y: i32,
+    scale: i32,
+    color: Rgba<u8>,
+    img_w: u32,
+    img_h: u32,
+) {
+    for row in 0..H {
+        for col in 0..W {
+            if glyph[row][col] == 1 {
+                for sy in 0..scale {
+                    for sx in 0..scale {
+                        let px_x = x + col as i32 * scale + sx;
+                        let px_y = y + row as i32 * scale + sy;
+                        if px_x >= 0 && px_x < img_w as i32 && px_y >= 0 && px_y < img_h as i32 {
+                            blend_pixel(img, px_x as u32, px_y as u32, color);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Draw floating "zZzZ" text that drifts upward and fades.
+/// Cartoonishly big — these are meant to be very visible and fun.
 fn draw_snore_text(img: &mut RgbaImage, t: f64, w: u32, h: u32) {
-    // Simple 5x5 pixel font for 'z' and 'Z'
-    let z_upper: [[u8; 5]; 5] = [
+    // Big chunky Z glyph (9x9)
+    let z_big: [[u8; 9]; 9] = [
+        [1, 1, 1, 1, 1, 1, 1, 1, 1],
+        [1, 1, 1, 1, 1, 1, 1, 1, 1],
+        [0, 0, 0, 0, 0, 0, 1, 1, 0],
+        [0, 0, 0, 0, 0, 1, 1, 0, 0],
+        [0, 0, 0, 0, 1, 1, 0, 0, 0],
+        [0, 0, 0, 1, 1, 0, 0, 0, 0],
+        [0, 0, 1, 1, 0, 0, 0, 0, 0],
+        [1, 1, 1, 1, 1, 1, 1, 1, 1],
+        [1, 1, 1, 1, 1, 1, 1, 1, 1],
+    ];
+
+    // Medium z glyph (7x7)
+    let z_med: [[u8; 7]; 7] = [
+        [1, 1, 1, 1, 1, 1, 1],
+        [0, 0, 0, 0, 0, 1, 1],
+        [0, 0, 0, 0, 1, 1, 0],
+        [0, 0, 0, 1, 1, 0, 0],
+        [0, 0, 1, 1, 0, 0, 0],
+        [0, 1, 1, 0, 0, 0, 0],
+        [1, 1, 1, 1, 1, 1, 1],
+    ];
+
+    // Small z glyph (5x5)
+    let z_small: [[u8; 5]; 5] = [
         [1, 1, 1, 1, 1],
         [0, 0, 0, 1, 0],
         [0, 0, 1, 0, 0],
         [0, 1, 0, 0, 0],
         [1, 1, 1, 1, 1],
     ];
-    let z_lower: [[u8; 3]; 4] = [
-        [1, 1, 1],
-        [0, 0, 1],
-        [0, 1, 0],
-        [1, 1, 1],
+
+    let base_x = (w as f64 * 0.65) as i32;
+    let cycle = t % 4.0; // 4-second cycle for more dramatic float
+
+    // Staggered Z's — big ones first, getting smaller as they float up
+    // (delay, x_offset, scale_factor: 0=big, 1=med, 2=small)
+    let z_positions: [(f64, i32, u8); 4] = [
+        (0.0, 0, 0),    // Big Z — starts first
+        (0.6, 14, 1),   // Medium z
+        (1.2, 24, 2),   // Small z
+        (1.8, 30, 1),   // Another medium z
     ];
 
-    // Position: float from right side of sprite, drifting up
-    let base_x = (w as f64 * 0.7) as i32;
-    let cycle = t % 3.0; // 3-second cycle
+    let color = Rgba([180, 210, 255, 255]); // Soft blue-white
 
-    // Draw 4 z's at staggered positions
-    let z_positions = [
-        (0.0, 0, 6),   // (delay, x_offset, size: 6=big, 4=small)
-        (0.4, 8, 4),
-        (0.8, 14, 6),
-        (1.2, 20, 4),
-    ];
-
-    let color = Rgba([180, 200, 255, 255]); // Soft blue-white
-
-    for (delay, x_off, size) in &z_positions {
+    for (delay, x_off, glyph_size) in &z_positions {
         let local_t = cycle - delay;
-        if local_t < 0.0 || local_t > 2.0 {
+        if local_t < 0.0 || local_t > 3.0 {
             continue;
         }
 
-        let alpha = if local_t < 0.3 {
-            (local_t / 0.3 * 255.0) as u8 // Fade in
-        } else if local_t > 1.5 {
-            ((2.0 - local_t) / 0.5 * 255.0) as u8 // Fade out
+        let alpha = if local_t < 0.4 {
+            (local_t / 0.4 * 255.0) as u8
+        } else if local_t > 2.2 {
+            ((3.0 - local_t) / 0.8 * 255.0) as u8
         } else {
             255
         };
 
-        let float_y = (h as f64 * 0.2 - local_t * 20.0) as i32;
-        let sway_x = (local_t * 2.0).sin() * 3.0;
+        // Float upward with a gentle arc
+        let float_y = (h as f64 * 0.3 - local_t * 30.0) as i32;
+        let sway_x = (local_t * 1.5).sin() * 8.0;
         let draw_x = base_x + x_off + sway_x as i32;
 
         let c = Rgba([color[0], color[1], color[2], alpha]);
 
-        if *size == 6 {
-            // Big Z
-            for (row, line) in z_upper.iter().enumerate() {
-                for (col, &px) in line.iter().enumerate() {
-                    if px == 1 {
-                        let px_x = draw_x + col as i32;
-                        let px_y = float_y + row as i32;
-                        if px_x >= 0 && px_x < w as i32 && px_y >= 0 && px_y < h as i32 {
-                            blend_pixel(img, px_x as u32, px_y as u32, c);
-                        }
-                    }
-                }
-            }
-        } else {
-            // Small z
-            for (row, line) in z_lower.iter().enumerate() {
-                for (col, &px) in line.iter().enumerate() {
-                    if px == 1 {
-                        let px_x = draw_x + col as i32;
-                        let px_y = float_y + row as i32;
-                        if px_x >= 0 && px_x < w as i32 && px_y >= 0 && px_y < h as i32 {
-                            blend_pixel(img, px_x as u32, px_y as u32, c);
-                        }
-                    }
-                }
-            }
+        // Draw the glyph scaled up — each pixel becomes a scale×scale block
+        match glyph_size {
+            0 => draw_glyph_scaled(img, &z_big, draw_x, float_y, 3, c, w, h),
+            1 => draw_glyph_scaled(img, &z_med, draw_x, float_y, 2, c, w, h),
+            _ => draw_glyph_scaled(img, &z_small, draw_x, float_y, 2, c, w, h),
         }
     }
 }
@@ -681,13 +753,13 @@ mod tests {
     #[test]
     fn test_frame_rate_varies_by_state() {
         let mut animator = Animator::new();
-        assert_eq!(animator.frame_rate_ms(), 100);
+        assert_eq!(animator.frame_rate_ms(), 80);
 
         animator.set_state(AnimationState::Eating);
-        assert_eq!(animator.frame_rate_ms(), 33);
+        assert_eq!(animator.frame_rate_ms(), 50);
 
         animator.set_state(AnimationState::Sleeping);
-        assert_eq!(animator.frame_rate_ms(), 150);
+        assert_eq!(animator.frame_rate_ms(), 100);
     }
 
     #[test]
