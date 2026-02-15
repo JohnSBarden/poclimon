@@ -257,6 +257,13 @@ fn run_app(
                     KeyCode::Left | KeyCode::Char('p') | KeyCode::Char('P') => {
                         app.prev_creature(picker);
                     }
+                    // Number keys 1-5 jump directly to roster slot
+                    KeyCode::Char(c @ '1'..='5') => {
+                        let index = (c as usize) - ('1' as usize);
+                        if index < creatures::ROSTER.len() {
+                            app.switch_creature(index, picker);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -327,7 +334,7 @@ fn ui(f: &mut Frame<'_>, app: &mut App) {
     f.render_widget(status, chunks[2]);
 
     // Help bar
-    let help = Paragraph::new("[E]at  [S]leep  [I]dle  [←/P]rev  [→/N]ext  [Q]uit")
+    let help = Paragraph::new("[E]at  [S]leep  [I]dle  [←/P]rev  [→/N]ext  [1-5] Slot  [Q]uit")
         .style(Style::default().fg(Color::DarkGray))
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(help, chunks[3]);
