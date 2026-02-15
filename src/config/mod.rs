@@ -56,7 +56,13 @@ impl Default for RosterConfig {
 }
 
 fn default_creatures() -> Vec<String> {
-    vec!["pikachu".to_string()]
+    vec![
+        "bulbasaur".to_string(),
+        "charmander".to_string(),
+        "squirtle".to_string(),
+        "pikachu".to_string(),
+        "eevee".to_string(),
+    ]
 }
 
 /// Resolved game config with validated creature IDs.
@@ -71,7 +77,13 @@ impl Default for GameConfig {
     fn default() -> Self {
         Self {
             scale: 6,
-            roster: vec![(25, "Pikachu".to_string())],
+            roster: vec![
+                (1, "Bulbasaur".to_string()),
+                (4, "Charmander".to_string()),
+                (7, "Squirtle".to_string()),
+                (25, "Pikachu".to_string()),
+                (133, "Eevee".to_string()),
+            ],
         }
     }
 }
@@ -94,12 +106,20 @@ impl GameConfig {
     }
 
     /// Load from the default config path (~/.poclimon/config.toml).
-    /// Returns default config if the file doesn't exist.
+    /// Creates a default config file if it doesn't exist.
     pub fn load_default() -> Result<Self, ConfigError> {
         let path = default_config_path();
         if path.exists() {
             Self::load(path)
         } else {
+            // Create the default config file so the user can discover and edit it
+            let default_toml = TomlConfig::default();
+            if let Some(parent) = path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let content = toml::to_string_pretty(&default_toml)
+                .unwrap_or_default();
+            let _ = fs::write(&path, &content);
             Ok(Self::default())
         }
     }
@@ -178,8 +198,10 @@ mod tests {
     fn test_default_config() {
         let config = GameConfig::default();
         assert_eq!(config.scale, 6);
-        assert_eq!(config.roster.len(), 1);
-        assert_eq!(config.roster[0], (25, "Pikachu".to_string()));
+        assert_eq!(config.roster.len(), 5);
+        assert_eq!(config.roster[0], (1, "Bulbasaur".to_string()));
+        assert_eq!(config.roster[3], (25, "Pikachu".to_string()));
+        assert_eq!(config.roster[4], (133, "Eevee".to_string()));
     }
 
     #[test]
@@ -252,8 +274,9 @@ creatures = ["mewtwo"]
         let toml_config = TomlConfig::default();
         let config = GameConfig::from_toml(toml_config).unwrap();
         assert_eq!(config.scale, 6);
-        assert_eq!(config.roster.len(), 1);
-        assert_eq!(config.roster[0].1, "Pikachu");
+        assert_eq!(config.roster.len(), 5);
+        assert_eq!(config.roster[0].1, "Bulbasaur");
+        assert_eq!(config.roster[3].1, "Pikachu");
     }
 
     #[test]
