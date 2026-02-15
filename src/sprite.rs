@@ -1,16 +1,64 @@
+//! Sprite downloading and caching for PoCLImon.
+//!
+//! Downloads official artwork PNGs from the PokeAPI sprites repository.
+//! Uses `curl` via `std::process::Command` to avoid pulling in a heavy HTTP
+//! client dependency (like `reqwest`) for a simple CLI tool.
+
 use anyhow::Result;
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+/// Sprite cache that maps pokemon_id -> filesystem path of downloaded sprite.
+pub struct SpriteCache {
+    cache_dir: PathBuf,
+    cached: HashMap<u32, PathBuf>,
+}
+
+impl SpriteCache {
+    /// Create a new sprite cache rooted at the given directory.
+    pub fn new(cache_dir: PathBuf) -> Result<Self> {
+        std::fs::create_dir_all(&cache_dir)?;
+        Ok(Self {
+            cache_dir,
+            cached: HashMap::new(),
+        })
+    }
+
+    /// Get the cache directory path.
+    pub fn cache_dir(&self) -> &Path {
+        &self.cache_dir
+    }
+
+    /// Get the sprite path for a Pokémon, downloading if necessary.
+    /// Returns `Ok(path)` on success, or an error string for UI display.
+    pub fn get_or_download(&mut self, pokemon_id: u32, name: &str) -> Result<PathBuf> {
+        if let Some(path) = self.cached.get(&pokemon_id) {
+            return Ok(path.clone());
+        }
+
+        let filename = format!("{}_{}.png", pokemon_id, name.to_lowercase());
+        let sprite_path = self.cache_dir.join(&filename);
+
+        if !sprite_path.exists() {
+            download_sprite(pokemon_id, &sprite_path)?;
+        }
+
+        self.cached.insert(pokemon_id, sprite_path.clone());
+        Ok(sprite_path)
+    }
+}
 
 /// Download a Pokémon sprite from PokeAPI sprites repo.
+///
 /// Uses the "official artwork" PNG which is a clean, high-res image.
+/// We shell out to `curl` rather than pulling in `reqwest` to keep
+/// the dependency tree small for this CLI tool.
 pub fn download_sprite(pokemon_id: u32, dest: &Path) -> Result<()> {
-    // Use official-artwork PNG (475x475, clean)
     let url = format!(
         "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon/other/official-artwork/{}.png",
         pokemon_id
     );
 
-    // Simple blocking HTTP download using std
     let output = std::process::Command::new("curl")
         .args(["-sL", "-o"])
         .arg(dest.as_os_str())
@@ -24,28 +72,24 @@ pub fn download_sprite(pokemon_id: u32, dest: &Path) -> Result<()> {
         );
     }
 
-    // Verify it's actually an image (check file size)
     let metadata = std::fs::metadata(dest)?;
     if metadata.len() < 100 {
         std::fs::remove_file(dest)?;
-        anyhow::bail!("Downloaded file too small, likely failed");
+        anyhow::bail!("Downloaded file too small, likely a 404");
     }
 
     Ok(())
 }
 
-/// Create a simple fallback sprite (a yellow square) when download fails.
+/// Create a simple fallback sprite (a colored circle) when download fails.
 pub fn create_fallback_sprite(dest: &Path) -> Result<()> {
     use image::{Rgba, RgbaImage};
 
     let mut img = RgbaImage::new(96, 96);
-
-    // Draw a simple Pikachu-esque shape (yellow circle with features)
     let yellow = Rgba([255, 220, 50, 255]);
     let black = Rgba([0, 0, 0, 255]);
-    let red = Rgba([220, 50, 50, 255]);
 
-    // Body (filled circle)
+    // Body circle
     for y in 0..96u32 {
         for x in 0..96u32 {
             let dx = x as f32 - 48.0;
@@ -66,42 +110,9 @@ pub fn create_fallback_sprite(dest: &Path) -> Result<()> {
         }
     }
 
-    // Cheeks
-    for y in 48..56 {
-        for x in 28..36 {
-            let dx = x as f32 - 32.0;
-            let dy = y as f32 - 52.0;
-            if dx * dx + dy * dy < 4.0 * 4.0 {
-                img.put_pixel(x, y, red);
-            }
-        }
-        for x in 60..68 {
-            let dx = x as f32 - 64.0;
-            let dy = y as f32 - 52.0;
-            if dx * dx + dy * dy < 4.0 * 4.0 {
-                img.put_pixel(x, y, red);
-            }
-        }
-    }
-
     // Mouth
     for x in 44..52 {
         img.put_pixel(x, 54, black);
-    }
-
-    // Ears (triangles at top)
-    for i in 0..15u32 {
-        for j in 0..i {
-            let x1 = 30 + j;
-            let y1 = 20 - i;
-            if x1 < 96 && y1 < 96 {
-                img.put_pixel(x1, y1, yellow);
-            }
-            let x2 = 66 - j;
-            if x2 < 96 {
-                img.put_pixel(x2, y1, yellow);
-            }
-        }
     }
 
     img.save(dest)?;
