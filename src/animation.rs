@@ -4,7 +4,7 @@
 //! with proper pre-rendered sprite sheet animations from PMDCollab.
 //!
 //! Each animation state (Idle, Eating, Sleeping) plays a corresponding
-//! sprite sheet animation. Frame timing comes from AnimData.xml durations.
+//! sprite sheet animation. All states loop infinitely.
 
 use image::DynamicImage;
 use std::time::Instant;
@@ -47,8 +47,8 @@ impl Animation {
         }
     }
 
-    /// Get the frame index for a given elapsed time (in ms), looping.
-    fn frame_index_looping(&self, elapsed_ms: u64) -> usize {
+    /// Get the frame index for a given elapsed time (in ms), looping infinitely.
+    pub fn frame_index_at(&self, elapsed_ms: u64) -> usize {
         if self.total_ms == 0 || self.frames.is_empty() {
             return 0;
         }
@@ -64,27 +64,6 @@ impl Animation {
         }
 
         self.frames.len() - 1
-    }
-
-    /// Get the frame index for a given elapsed time (in ms), clamping at end.
-    fn frame_index_once(&self, elapsed_ms: u64) -> (usize, bool) {
-        if self.total_ms == 0 || self.frames.is_empty() {
-            return (0, true);
-        }
-
-        if elapsed_ms >= self.total_ms {
-            return (self.frames.len() - 1, true);
-        }
-
-        let mut accumulated = 0u64;
-        for (i, &dur) in self.durations_ms.iter().enumerate() {
-            accumulated += dur;
-            if elapsed_ms < accumulated {
-                return (i, false);
-            }
-        }
-
-        (self.frames.len() - 1, true)
     }
 }
 
@@ -128,7 +107,7 @@ impl Animator {
         self.state
     }
 
-    /// Switch to a new animation state.
+    /// Switch to a new animation state, resetting the animation timer.
     pub fn set_state(&mut self, state: AnimationState) {
         if self.state != state {
             self.state = state;
@@ -137,46 +116,34 @@ impl Animator {
     }
 
     /// Advance the animation. Call this each frame.
-    /// Returns true if the state changed (e.g., Eating finished → Idle).
+    ///
+    /// All animation states loop infinitely; this method no longer triggers
+    /// automatic state transitions. Always returns `false`.
     pub fn tick(&mut self) -> bool {
-        // If eating, check if the animation has finished playing once
-        if self.state == AnimationState::Eating {
-            if let Some(ref anim) = self.eat_anim {
-                let elapsed_ms = self.state_start.elapsed().as_millis() as u64;
-                let (_, done) = anim.frame_index_once(elapsed_ms);
-                if done {
-                    self.state = AnimationState::Idle;
-                    self.state_start = Instant::now();
-                    return true;
-                }
-            }
-        }
         false
     }
 
-    /// Get the current animation frame to display.
-    /// Returns None if no animations are loaded.
-    pub fn render_frame(&self) -> Option<&DynamicImage> {
+    /// Get the current frame index based on elapsed time.
+    ///
+    /// Returns `None` if no animations have been loaded yet.
+    pub fn current_frame_index(&self) -> Option<usize> {
         let elapsed_ms = self.state_start.elapsed().as_millis() as u64;
-
         match self.state {
             AnimationState::Idle => {
                 let anim = self.idle_anim.as_ref()?;
-                let idx = anim.frame_index_looping(elapsed_ms);
-                anim.frames.get(idx)
-            }
-            AnimationState::Sleeping => {
-                let anim = self.sleep_anim.as_ref()?;
-                let idx = anim.frame_index_looping(elapsed_ms);
-                anim.frames.get(idx)
+                Some(anim.frame_index_at(elapsed_ms))
             }
             AnimationState::Eating => {
                 let anim = self.eat_anim.as_ref()?;
-                let (idx, _) = anim.frame_index_once(elapsed_ms);
-                anim.frames.get(idx)
+                Some(anim.frame_index_at(elapsed_ms))
+            }
+            AnimationState::Sleeping => {
+                let anim = self.sleep_anim.as_ref()?;
+                Some(anim.frame_index_at(elapsed_ms))
             }
         }
     }
+
 }
 
 #[cfg(test)]
@@ -232,37 +199,46 @@ mod tests {
     fn test_animation_looping_frame_index() {
         let anim = make_test_animation();
         // 100ms per frame, 300ms total
-        assert_eq!(anim.frame_index_looping(0), 0);    // start of frame 0
-        assert_eq!(anim.frame_index_looping(50), 0);   // middle of frame 0
-        assert_eq!(anim.frame_index_looping(100), 1);  // start of frame 1
-        assert_eq!(anim.frame_index_looping(200), 2);  // start of frame 2
-        assert_eq!(anim.frame_index_looping(300), 0);  // loops back
-        assert_eq!(anim.frame_index_looping(400), 1);  // looped frame 1
+        assert_eq!(anim.frame_index_at(0), 0);    // start of frame 0
+        assert_eq!(anim.frame_index_at(50), 0);   // middle of frame 0
+        assert_eq!(anim.frame_index_at(100), 1);  // start of frame 1
+        assert_eq!(anim.frame_index_at(200), 2);  // start of frame 2
+        assert_eq!(anim.frame_index_at(300), 0);  // loops back
+        assert_eq!(anim.frame_index_at(400), 1);  // looped frame 1
     }
 
     #[test]
-    fn test_animation_once_frame_index() {
-        let anim = make_test_animation();
-        assert_eq!(anim.frame_index_once(0), (0, false));
-        assert_eq!(anim.frame_index_once(150), (1, false));
-        assert_eq!(anim.frame_index_once(300), (2, true));  // done
-        assert_eq!(anim.frame_index_once(500), (2, true));  // still done
-    }
-
-    #[test]
-    fn test_render_frame_returns_none_without_animations() {
-        let animator = Animator::new();
-        assert!(animator.render_frame().is_none());
-    }
-
-    #[test]
-    fn test_render_frame_returns_some_with_animations() {
+    fn test_eating_loops_infinitely() {
+        // Eating should loop just like Idle and Sleep — no automatic return to Idle.
         let mut animator = Animator::new();
         animator.load_animations(
             make_test_animation(),
             make_test_animation(),
             make_test_animation(),
         );
-        assert!(animator.render_frame().is_some());
+        animator.set_state(AnimationState::Eating);
+        // tick() should never change the state back to Idle
+        for _ in 0..1000 {
+            let changed = animator.tick();
+            assert!(!changed, "tick() must not trigger state transitions");
+            assert_eq!(animator.state(), AnimationState::Eating);
+        }
+    }
+
+    #[test]
+    fn test_current_frame_index_returns_none_without_animations() {
+        let animator = Animator::new();
+        assert!(animator.current_frame_index().is_none());
+    }
+
+    #[test]
+    fn test_current_frame_index_returns_some_with_animations() {
+        let mut animator = Animator::new();
+        animator.load_animations(
+            make_test_animation(),
+            make_test_animation(),
+            make_test_animation(),
+        );
+        assert!(animator.current_frame_index().is_some());
     }
 }

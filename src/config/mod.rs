@@ -17,7 +17,7 @@ pub enum ConfigError {
 }
 
 /// Raw TOML config structure.
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct TomlConfig {
     #[serde(default)]
     pub display: DisplayConfig,
@@ -88,15 +88,6 @@ impl Default for GameConfig {
     }
 }
 
-impl Default for TomlConfig {
-    fn default() -> Self {
-        Self {
-            display: DisplayConfig::default(),
-            roster: RosterConfig::default(),
-        }
-    }
-}
-
 impl GameConfig {
     /// Load and validate config from a TOML file.
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
@@ -139,9 +130,9 @@ impl GameConfig {
     pub fn from_toml(toml: TomlConfig) -> Result<Self, ConfigError> {
         let creatures = &toml.roster.creatures;
 
-        if creatures.len() > 6 {
+        if creatures.len() > 11 {
             return Err(ConfigError::Validation(
-                "Maximum 6 creatures allowed in roster".to_string(),
+                "Maximum 11 creatures allowed in roster".to_string(),
             ));
         }
 
@@ -234,15 +225,16 @@ creatures = ["25", "1"]
     }
 
     #[test]
-    fn test_validation_max_six() {
+    fn test_validation_max_eleven() {
+        // Build a roster with 12 entries (exceeds the limit of 11).
         let toml_str = r#"
 [roster]
-creatures = ["pikachu", "eevee", "bulbasaur", "charmander", "squirtle", "pikachu", "eevee"]
+creatures = ["pikachu","eevee","bulbasaur","charmander","squirtle","vaporeon","jolteon","flareon","articuno","zapdos","moltres","pikachu"]
 "#;
         let toml_config: TomlConfig = toml::from_str(toml_str).unwrap();
         let result = GameConfig::from_toml(toml_config);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Maximum 6"));
+        assert!(result.unwrap_err().to_string().contains("Maximum 11"));
     }
 
     #[test]
@@ -302,4 +294,26 @@ creatures = ["pikachu", "eevee", "bulbasaur", "charmander", "squirtle", "pikachu
         let config = GameConfig::from_toml(toml_config).unwrap();
         assert_eq!(config.roster.len(), 6);
     }
+
+    #[test]
+    fn test_new_creatures_by_name() {
+        for name in &["vaporeon", "jolteon", "flareon", "articuno", "zapdos", "moltres"] {
+            let config = GameConfig::from_creature_name(name).unwrap();
+            assert_eq!(config.roster.len(), 1);
+        }
+    }
+
+    #[test]
+    fn test_new_creatures_by_id() {
+        let toml_str = r#"
+[roster]
+creatures = ["134", "135", "136", "144", "145", "146"]
+"#;
+        let toml_config: TomlConfig = toml::from_str(toml_str).unwrap();
+        let config = GameConfig::from_toml(toml_config).unwrap();
+        assert_eq!(config.roster.len(), 6);
+        assert_eq!(config.roster[0].1, "Vaporeon");
+        assert_eq!(config.roster[5].1, "Moltres");
+    }
 }
+

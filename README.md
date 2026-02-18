@@ -10,18 +10,30 @@
 - 🎨 Sprite animations from the PMDCollab SpriteCollab repository
 - 🔄 Multiple creatures displayed simultaneously (up to 6)
 - 🍖 Feed, sleep, and interact with your creatures
-- ⚙️ TOML-based configuration for customizing your roster
+- ➕ Add, remove, and swap creatures at runtime — no config editing required
+- ⚙️ TOML-based configuration for customizing your starting roster
 - 🖼️ Sixel/Kitty/iTerm2 image protocol support via ratatui-image
+- ⚡ Performance-optimised: sprites are pre-scaled at load time and only
+  redrawn when the displayed frame actually changes
 
 ## Creature Roster
 
-| Name       | ID  |
-|------------|-----|
-| Bulbasaur  | 1   |
-| Charmander | 4   |
-| Squirtle   | 7   |
-| Pikachu    | 25  |
-| Eevee      | 133 |
+PoCLImon ships with 11 creatures, all sourced from the PMDCollab sprite
+repository. Press `A` in-app to add them to your roster on demand.
+
+| Name       | ID  | Group                    |
+|------------|-----|--------------------------|
+| Bulbasaur  | 1   | Gen 1 Starter            |
+| Charmander | 4   | Gen 1 Starter            |
+| Squirtle   | 7   | Gen 1 Starter            |
+| Pikachu    | 25  | Electric Mouse           |
+| Eevee      | 133 | Eevee Family             |
+| Vaporeon   | 134 | Eevee Evolution (Water)  |
+| Jolteon    | 135 | Eevee Evolution (Electric)|
+| Flareon    | 136 | Eevee Evolution (Fire)   |
+| Articuno   | 144 | Legendary Bird (Ice)     |
+| Zapdos     | 145 | Legendary Bird (Electric)|
+| Moltres    | 146 | Legendary Bird (Fire)    |
 
 ## Installation
 
@@ -54,11 +66,26 @@ poclimon --config ./my-config.toml
 
 ## Controls
 
+### Animation States
+
+| Key         | Action                                   |
+|-------------|------------------------------------------|
+| `E`         | Feed the selected creature (loops)       |
+| `S`         | Put the selected creature to sleep (loops)|
+| `I`         | Set the selected creature to idle (loops)|
+
+### Roster Management
+
+| Key         | Action                                                    |
+|-------------|-----------------------------------------------------------|
+| `A`         | Add the next available creature to the roster             |
+| `R`         | Remove the selected creature (requires 2+ creatures)      |
+| `Tab`       | Swap the selected slot to the next creature               |
+
+### Navigation
+
 | Key         | Action                          |
 |-------------|---------------------------------|
-| `E`         | Feed the selected creature      |
-| `S`         | Put the selected creature to sleep |
-| `I`         | Set the selected creature to idle |
 | `←` / `→`  | Cycle selected creature         |
 | `1`–`6`    | Select creature by slot number  |
 | `Q` / `Esc` | Quit                           |
@@ -75,13 +102,13 @@ PoCLImon uses a TOML config file. Default location: `~/.poclimon/config.toml`
 scale = 6
 
 [roster]
-# Active creatures to display (max 6)
+# Starting creatures (max 6 at startup; use A/R/Tab to change at runtime)
 # Use Pokemon names (lowercase) or IDs
 creatures = ["pikachu", "eevee", "bulbasaur"]
 ```
 
-The `roster.creatures` array determines which creatures are displayed simultaneously.
-You can use lowercase names or numeric IDs (as strings). Maximum 6 creatures.
+The `roster.creatures` array sets the starting roster. You can then use
+`A`, `R`, and `Tab` to modify it at runtime without editing any files.
 
 ## Credits
 

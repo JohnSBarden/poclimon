@@ -11,21 +11,37 @@ pub struct CreatureDef {
     pub name: &'static str,
 }
 
-impl CreatureDef {
-    /// Get the zero-padded ID string used in PMDCollab paths (e.g., "0025").
-    #[allow(dead_code)]
-    pub fn padded_id(&self) -> String {
-        format!("{:04}", self.id)
-    }
+/// Zero-pad a National Pokédex ID to 4 digits, as used in PMDCollab sprite paths.
+///
+/// # Examples
+/// ```
+/// assert_eq!(poclimon::creatures::padded_id(25), "0025");
+/// assert_eq!(poclimon::creatures::padded_id(146), "0146");
+/// ```
+pub fn padded_id(id: u32) -> String {
+    format!("{:04}", id)
 }
 
-/// The default roster of creatures available in v0.0.1.
+/// All creatures available in PoCLImon.
+///
+/// IDs correspond to National Pokédex numbers. Sprites are sourced from
+/// the PMDCollab SpriteCollab repository and cached locally on first use.
 pub const ROSTER: &[CreatureDef] = &[
-    CreatureDef { id: 1, name: "Bulbasaur" },
-    CreatureDef { id: 4, name: "Charmander" },
-    CreatureDef { id: 7, name: "Squirtle" },
-    CreatureDef { id: 25, name: "Pikachu" },
-    CreatureDef { id: 133, name: "Eevee" },
+    // Gen 1 starters
+    CreatureDef { id: 1,   name: "Bulbasaur"  },
+    CreatureDef { id: 4,   name: "Charmander" },
+    CreatureDef { id: 7,   name: "Squirtle"   },
+    // Electric mouse
+    CreatureDef { id: 25,  name: "Pikachu"    },
+    // Eevee and its evolutions
+    CreatureDef { id: 133, name: "Eevee"      },
+    CreatureDef { id: 134, name: "Vaporeon"   },
+    CreatureDef { id: 135, name: "Jolteon"    },
+    CreatureDef { id: 136, name: "Flareon"    },
+    // Legendary birds
+    CreatureDef { id: 144, name: "Articuno"   },
+    CreatureDef { id: 145, name: "Zapdos"     },
+    CreatureDef { id: 146, name: "Moltres"    },
 ];
 
 /// Find a creature by ID.
@@ -44,8 +60,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_roster_has_five_creatures() {
-        assert_eq!(ROSTER.len(), 5);
+    fn test_roster_has_eleven_creatures() {
+        assert_eq!(ROSTER.len(), 11);
+    }
+
+    #[test]
+    fn test_original_five_present() {
+        assert!(find_by_id(1).is_some());   // Bulbasaur
+        assert!(find_by_id(4).is_some());   // Charmander
+        assert!(find_by_id(7).is_some());   // Squirtle
+        assert!(find_by_id(25).is_some());  // Pikachu
+        assert!(find_by_id(133).is_some()); // Eevee
+    }
+
+    #[test]
+    fn test_eevee_evolutions_present() {
+        assert_eq!(find_by_id(134).unwrap().name, "Vaporeon");
+        assert_eq!(find_by_id(135).unwrap().name, "Jolteon");
+        assert_eq!(find_by_id(136).unwrap().name, "Flareon");
+    }
+
+    #[test]
+    fn test_legendary_birds_present() {
+        assert_eq!(find_by_id(144).unwrap().name, "Articuno");
+        assert_eq!(find_by_id(145).unwrap().name, "Zapdos");
+        assert_eq!(find_by_id(146).unwrap().name, "Moltres");
     }
 
     #[test]
@@ -59,13 +98,16 @@ mod tests {
     fn test_find_by_name() {
         assert_eq!(find_by_name("eevee").unwrap().id, 133);
         assert_eq!(find_by_name("Charmander").unwrap().id, 4);
+        assert_eq!(find_by_name("vaporeon").unwrap().id, 134);
+        assert_eq!(find_by_name("ZAPDOS").unwrap().id, 145);
         assert!(find_by_name("Mewtwo").is_none());
     }
 
     #[test]
     fn test_padded_id() {
-        assert_eq!(find_by_id(1).unwrap().padded_id(), "0001");
-        assert_eq!(find_by_id(25).unwrap().padded_id(), "0025");
-        assert_eq!(find_by_id(133).unwrap().padded_id(), "0133");
+        assert_eq!(padded_id(1), "0001");
+        assert_eq!(padded_id(25), "0025");
+        assert_eq!(padded_id(133), "0133");
+        assert_eq!(padded_id(146), "0146");
     }
 }
