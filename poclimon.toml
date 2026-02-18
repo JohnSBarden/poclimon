@@ -2,8 +2,9 @@
 # Copy to ~/.poclimon/config.toml to use as default
 
 [display]
-# Scale multiplier for sprites (default 6)
-scale = 6
+# Scale multiplier for sprites (default 3 since v0.0.3; was 6 in v0.0.2)
+# Reducing from 6 to 3 cuts memory usage ~4× (6²/3² = 4) with no loss of clarity.
+scale = 3
 
 [roster]
 # Active creatures to display (max 6)

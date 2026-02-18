@@ -17,6 +17,10 @@ const SPRITECOLLAB_BASE: &str =
 /// The animation names we need for our virtual pet.
 const NEEDED_ANIMS: &[&str] = &["Idle", "Sleep", "Eat"];
 
+/// Result type for [`download_all_sprites`]:
+/// `(anim_data_path, downloaded_sheets, warning_messages)`.
+type SpriteDownloadResult = (PathBuf, Vec<(String, PathBuf)>, Vec<String>);
+
 /// Get the cache directory for a creature's sprites.
 /// Creates the directory if it doesn't exist.
 pub fn sprite_cache_dir(creature_id: u32) -> Result<PathBuf> {
@@ -89,24 +93,28 @@ pub fn download_sprite_sheet(creature_id: u32, anim_name: &str) -> Result<PathBu
 }
 
 /// Download all needed sprites for a creature (AnimData.xml + sprite sheets).
-/// Returns (anim_data_path, Vec<(anim_name, sheet_path)>).
-pub fn download_all_sprites(
-    creature_id: u32,
-) -> Result<(PathBuf, Vec<(String, PathBuf)>)> {
+///
+/// Returns `(anim_data_path, sheets, warnings)`.
+/// - `sheets`: successfully downloaded `(anim_name, path)` pairs.
+/// - `warnings`: non-fatal messages for any animation that couldn't be
+///   downloaded (e.g., a missing sheet); the caller displays these via
+///   the in-TUI notification system rather than writing to stderr.
+pub fn download_all_sprites(creature_id: u32) -> Result<SpriteDownloadResult> {
     let anim_data_path = download_anim_data(creature_id)?;
 
     let mut sheets = Vec::new();
+    let mut warnings = Vec::new();
     for &anim_name in NEEDED_ANIMS {
         match download_sprite_sheet(creature_id, anim_name) {
             Ok(path) => sheets.push((anim_name.to_string(), path)),
             Err(e) => {
-                eprintln!(
-                    "Warning: couldn't download {} for creature {}: {}",
+                warnings.push(format!(
+                    "Couldn't download {} for creature {}: {}",
                     anim_name, creature_id, e
-                );
+                ));
             }
         }
     }
 
-    Ok((anim_data_path, sheets))
+    Ok((anim_data_path, sheets, warnings))
 }
