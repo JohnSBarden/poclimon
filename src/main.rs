@@ -134,44 +134,19 @@ impl App {
     }
 
     /// Load sprites for all creatures currently in the roster.
-    fn load_all_sprites(&mut self, picker: &mut Picker) -> Result<()> {
+    fn load_all_sprites(&mut self) -> Result<()> {
         for i in 0..self.slots.len() {
             load_slot_sprites(&mut self.slots[i], self.config.scale)?;
         }
-        // Render first frames for all slots.
-        self.update_all_displays(picker);
         Ok(())
     }
 
-    /// Tick all animators and rebuild `StatefulProtocol` only when the
-    /// displayed frame has actually changed.  This is the hot path —
-    /// no image resizing happens here.
-    fn update_all_displays(&mut self, picker: &mut Picker) {
+    /// Tick all animators. Protocol creation is deferred to `render_pen`
+    /// where the actual `Rect` is known — avoids wasted allocations when the
+    /// rect hasn't been determined yet (startup, new slots).
+    fn update_all_displays(&mut self) {
         for slot in &mut self.slots {
             slot.animator.tick();
-
-            let state = slot.animator.state();
-            let Some(frame_idx) = slot.animator.current_frame_index() else {
-                continue;
-            };
-
-            let render_key = (state, frame_idx);
-            if slot.last_render_key == Some(render_key) {
-                // Frame unchanged — no need to recreate the protocol.
-                continue;
-            }
-
-            let frames = match state {
-                AnimationState::Idle => &slot.cached_idle,
-                AnimationState::Eating => &slot.cached_eat,
-                AnimationState::Sleeping => &slot.cached_sleep,
-            };
-
-            if let Some(frame) = frames.get(frame_idx) {
-                slot.current_frame =
-                    Some(picker.new_resize_protocol(frame.clone()));
-                slot.last_render_key = Some(render_key);
-            }
         }
     }
 
@@ -208,7 +183,7 @@ impl App {
     /// Cycles through `creatures::ROSTER` in order, skipping IDs already
     /// present.  Does nothing when all creatures are already in the roster
     /// or the roster is already at the display limit (6 slots).
-    fn add_creature(&mut self, picker: &mut Picker) {
+    fn add_creature(&mut self) {
         // Cap at 6 for the pen renderer.
         if self.slots.len() >= 6 {
             return;
@@ -235,20 +210,7 @@ impl App {
 
         let mut slot = CreatureSlot::new(creature.id, creature.name.to_string());
         if load_slot_sprites(&mut slot, self.config.scale).is_ok() {
-            // Trigger immediate render for the first frame.
-            let state = slot.animator.state();
-            if let Some(frame_idx) = slot.animator.current_frame_index() {
-                let frames = match state {
-                    AnimationState::Idle => &slot.cached_idle,
-                    AnimationState::Eating => &slot.cached_eat,
-                    AnimationState::Sleeping => &slot.cached_sleep,
-                };
-                if let Some(frame) = frames.get(frame_idx) {
-                    slot.current_frame =
-                        Some(picker.new_resize_protocol(frame.clone()));
-                    slot.last_render_key = Some((state, frame_idx));
-                }
-            }
+            // Protocol will be built on first render pass in render_pen.
             self.slots.push(slot);
         }
     }
@@ -269,7 +231,7 @@ impl App {
 
     /// Cycle the creature in the selected slot through all `creatures::ROSTER`
     /// entries, wrapping around. This may download and cache new sprites.
-    fn cycle_selected_creature(&mut self, picker: &mut Picker) {
+    fn cycle_selected_creature(&mut self) {
         let Some(slot) = self.slots.get(self.selected) else {
             return;
         };
@@ -277,7 +239,6 @@ impl App {
         let current_id = slot.creature_id;
         let roster = creatures::ROSTER;
 
-        // Find the current position in ROSTER (fall back to 0 if not found).
         let current_pos = roster
             .iter()
             .position(|c| c.id == current_id)
@@ -288,20 +249,7 @@ impl App {
 
         let mut new_slot = CreatureSlot::new(next.id, next.name.to_string());
         if load_slot_sprites(&mut new_slot, self.config.scale).is_ok() {
-            // Trigger immediate render.
-            let state = new_slot.animator.state();
-            if let Some(frame_idx) = new_slot.animator.current_frame_index() {
-                let frames = match state {
-                    AnimationState::Idle => &new_slot.cached_idle,
-                    AnimationState::Eating => &new_slot.cached_eat,
-                    AnimationState::Sleeping => &new_slot.cached_sleep,
-                };
-                if let Some(frame) = frames.get(frame_idx) {
-                    new_slot.current_frame =
-                        Some(picker.new_resize_protocol(frame.clone()));
-                    new_slot.last_render_key = Some((state, frame_idx));
-                }
-            }
+            // Protocol will be built on first render pass in render_pen.
             self.slots[self.selected] = new_slot;
         }
     }
@@ -477,7 +425,7 @@ fn main() -> Result<()> {
 
     let mut app = App::new(config);
 
-    if let Err(e) = app.load_all_sprites(&mut picker) {
+    if let Err(e) = app.load_all_sprites() {
         eprintln!("Failed to load sprites: {}", e);
     }
 
@@ -502,8 +450,8 @@ fn run_app(
     let frame_duration = Duration::from_millis(50);
 
     while app.running {
-        app.update_all_displays(picker);
-        terminal.draw(|f| ui(f, app))?;
+        app.update_all_displays();
+        terminal.draw(|f| ui(f, app, picker))?;
 
         if event::poll(frame_duration)?
             && let Event::Key(KeyEvent {
@@ -526,13 +474,13 @@ fn run_app(
                     app.set_selected_state(AnimationState::Idle);
                 }
                 KeyCode::Char('a') | KeyCode::Char('A') => {
-                    app.add_creature(picker);
+                    app.add_creature();
                 }
                 KeyCode::Char('r') | KeyCode::Char('R') => {
                     app.remove_selected();
                 }
                 KeyCode::Tab => {
-                    app.cycle_selected_creature(picker);
+                    app.cycle_selected_creature();
                 }
                 KeyCode::Right => app.select_next(),
                 KeyCode::Left => app.select_prev(),
@@ -551,7 +499,7 @@ fn run_app(
 
 // ── UI layout ──────────────────────────────────────────────────────────────────
 
-fn ui(f: &mut Frame<'_>, app: &mut App) {
+fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker) {
     let chunks = Layout::vertical([
         Constraint::Length(3), // Title bar
         Constraint::Min(10),   // Pen (shared creature canvas)
@@ -607,7 +555,7 @@ fn ui(f: &mut Frame<'_>, app: &mut App) {
         .unwrap_or(Color::White);
 
     // Shared pen — all creatures on one open canvas.
-    render_pen(f, chunks[1], app);
+    render_pen(f, chunks[1], app, picker);
 
     let status = Paragraph::new(Line::from(vec![
         Span::raw(format!("{}: ", selected_name)),
@@ -632,7 +580,7 @@ fn ui(f: &mut Frame<'_>, app: &mut App) {
 /// A single outer border wraps the pen area.  Creatures are spaced evenly
 /// along the horizontal axis; a name label below each sprite acts as the
 /// selection indicator (Yellow + ▲ for selected, DarkGray for others).
-fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App) {
+fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker) {
     let count = app.slots.len();
     if count == 0 {
         return;
@@ -664,13 +612,27 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App) {
 
         let slot = &mut app.slots[i];
 
-        // Invalidate the cached protocol if the render area changed
-        // (e.g. terminal was resized). Fixed-width columns mean this only
-        // fires on genuine terminal resize, not on add/remove.
-        if slot.last_render_rect != Some(img_area) {
-            slot.current_frame = None;
-            slot.last_render_key = None;
-            slot.last_render_rect = Some(img_area);
+        // Build (or rebuild) the StatefulProtocol here, where the Rect is
+        // known. Rebuild only when the (state, frame_index) pair changes OR
+        // the render area changes (terminal resize). This is the single source
+        // of protocol creation — update_all_displays only ticks animators.
+        let state = slot.animator.state();
+        let frame_idx = slot.animator.current_frame_index().unwrap_or(0);
+        let render_key = (state, frame_idx);
+        let rect_changed = slot.last_render_rect != Some(img_area);
+        let frame_changed = slot.last_render_key != Some(render_key);
+
+        if rect_changed || frame_changed {
+            let frames = match state {
+                AnimationState::Idle => &slot.cached_idle,
+                AnimationState::Eating => &slot.cached_eat,
+                AnimationState::Sleeping => &slot.cached_sleep,
+            };
+            if let Some(frame) = frames.get(frame_idx) {
+                slot.current_frame = Some(picker.new_resize_protocol(frame.clone()));
+                slot.last_render_key = Some(render_key);
+                slot.last_render_rect = Some(img_area);
+            }
         }
 
         // Render sprite (or "Loading…" fallback).
