@@ -8,10 +8,7 @@ use std::collections::HashMap;
 
 /// Information about a single animation (e.g. "Idle", "Sleep", "Eat").
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct AnimInfo {
-    /// Animation name (e.g. "Idle")
-    pub name: String,
     /// Width of each frame in pixels
     pub frame_width: u32,
     /// Height of each frame in pixels
@@ -28,7 +25,7 @@ impl AnimInfo {
 
     /// Total duration of one full animation cycle in milliseconds.
     /// Each tick is ~50ms.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn total_duration_ms(&self) -> u64 {
         self.durations.iter().map(|&d| d as u64 * 50).sum()
     }
@@ -67,7 +64,7 @@ pub fn parse_anim_data(xml: &str) -> HashMap<String, AnimInfo> {
             None => continue,
         };
 
-        // Extract name
+        // Extract name (used as the HashMap key)
         let name = match extract_tag_value(block, "Name") {
             Some(n) => n,
             None => continue,
@@ -97,9 +94,8 @@ pub fn parse_anim_data(xml: &str) -> HashMap<String, AnimInfo> {
         }
 
         result.insert(
-            name.clone(),
+            name,
             AnimInfo {
-                name,
                 frame_width,
                 frame_height,
                 durations,
@@ -126,10 +122,10 @@ fn extract_durations(block: &str) -> Vec<u32> {
     let mut durations = Vec::new();
 
     for part in block.split("<Duration>").skip(1) {
-        if let Some(end) = part.find("</Duration>") {
-            if let Ok(val) = part[..end].trim().parse::<u32>() {
-                durations.push(val);
-            }
+        if let Some(end) = part.find("</Duration>")
+            && let Ok(val) = part[..end].trim().parse::<u32>()
+        {
+            durations.push(val);
         }
     }
 

@@ -6,6 +6,7 @@
 
 pub mod fallback;
 
+use crate::creatures;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
@@ -25,7 +26,7 @@ pub fn sprite_cache_dir(creature_id: u32) -> Result<PathBuf> {
     let dir = home
         .join(".poclimon")
         .join("sprites")
-        .join(format!("{:04}", creature_id));
+        .join(creatures::padded_id(creature_id));
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
 }
@@ -66,8 +67,8 @@ pub fn download_anim_data(creature_id: u32) -> Result<PathBuf> {
     let cache_dir = sprite_cache_dir(creature_id)?;
     let dest = cache_dir.join("AnimData.xml");
 
-    let padded_id = format!("{:04}", creature_id);
-    let url = format!("{}/{}/AnimData.xml", SPRITECOLLAB_BASE, padded_id);
+    let pid = creatures::padded_id(creature_id);
+    let url = format!("{}/{}/AnimData.xml", SPRITECOLLAB_BASE, pid);
 
     download_file(&url, &dest)?;
     Ok(dest)
@@ -80,8 +81,8 @@ pub fn download_sprite_sheet(creature_id: u32, anim_name: &str) -> Result<PathBu
     let filename = format!("{}-Anim.png", anim_name);
     let dest = cache_dir.join(&filename);
 
-    let padded_id = format!("{:04}", creature_id);
-    let url = format!("{}/{}/{}", SPRITECOLLAB_BASE, padded_id, filename);
+    let pid = creatures::padded_id(creature_id);
+    let url = format!("{}/{}/{}", SPRITECOLLAB_BASE, pid, filename);
 
     download_file(&url, &dest)?;
     Ok(dest)

@@ -1,8 +1,13 @@
-//! Sprite sheet frame extraction.
+//! Sprite sheet frame extraction and normalization.
 //!
 //! PMDCollab sprite sheets have 8 rows (one per direction) and N columns
 //! (one per frame). We only need row 0 (facing down/toward the viewer)
 //! for our virtual pet display.
+//!
+//! Because different animations (Idle, Sleep, Eat) may have different frame
+//! dimensions in AnimData.xml, we normalize all frames to a canonical size
+//! (the Idle animation's dimensions) after extraction to avoid layout jumps
+//! when switching states.
 
 use crate::anim_data::AnimInfo;
 use image::{DynamicImage, GenericImageView};
@@ -14,7 +19,7 @@ use image::{DynamicImage, GenericImageView};
 /// - Each column is a frame
 /// - Frame size is defined by `anim_info.frame_width` x `anim_info.frame_height`
 ///
-/// Returns a Vec of cropped frame images, one per frame in the animation.
+/// Returns a `Vec` of cropped frame images, one per frame in the animation.
 pub fn extract_frames(sheet: &DynamicImage, anim_info: &AnimInfo) -> Vec<DynamicImage> {
     let frame_count = anim_info.frame_count();
     let fw = anim_info.frame_width;
@@ -37,6 +42,39 @@ pub fn extract_frames(sheet: &DynamicImage, anim_info: &AnimInfo) -> Vec<Dynamic
     }
 
     frames
+}
+
+/// Normalize a set of frames to the given target dimensions using
+/// nearest-neighbor scaling.
+///
+/// This ensures that animations with different native frame sizes (e.g., Idle
+/// vs. Sleep) all render at the same size in the TUI, preventing layout jumps
+/// when the user changes animation state.
+///
+/// If a frame is already the target size it is returned as-is without copying.
+pub fn normalize_frames(
+    frames: Vec<DynamicImage>,
+    target_w: u32,
+    target_h: u32,
+) -> Vec<DynamicImage> {
+    if target_w == 0 || target_h == 0 {
+        return frames;
+    }
+    frames
+        .into_iter()
+        .map(|frame| {
+            if frame.width() == target_w && frame.height() == target_h {
+                frame
+            } else {
+                DynamicImage::ImageRgba8(image::imageops::resize(
+                    &frame,
+                    target_w,
+                    target_h,
+                    image::imageops::FilterType::Nearest,
+                ))
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -74,7 +112,6 @@ mod tests {
 
     fn make_test_anim_info() -> AnimInfo {
         AnimInfo {
-            name: "Test".to_string(),
             frame_width: 10,
             frame_height: 10,
             durations: vec![5, 5, 5],
@@ -118,7 +155,6 @@ mod tests {
         let sheet = make_test_sheet();
         // Claim 5 frames but sheet only has 3 columns
         let info = AnimInfo {
-            name: "Test".to_string(),
             frame_width: 10,
             frame_height: 10,
             durations: vec![5, 5, 5, 5, 5],
@@ -126,5 +162,43 @@ mod tests {
         let frames = extract_frames(&sheet, &info);
         // Should only extract 3 frames (stops at sheet boundary)
         assert_eq!(frames.len(), 3);
+    }
+
+    #[test]
+    fn test_normalize_frames_resizes_to_target() {
+        // Create a 4x4 frame
+        let small = DynamicImage::ImageRgba8(RgbaImage::new(4, 4));
+        let frames = vec![small];
+        let normalized = normalize_frames(frames, 8, 8);
+        assert_eq!(normalized.len(), 1);
+        assert_eq!(normalized[0].dimensions(), (8, 8));
+    }
+
+    #[test]
+    fn test_normalize_frames_passthrough_when_already_correct() {
+        let frame = DynamicImage::ImageRgba8(RgbaImage::new(10, 10));
+        let frames = vec![frame];
+        let normalized = normalize_frames(frames, 10, 10);
+        assert_eq!(normalized.len(), 1);
+        assert_eq!(normalized[0].dimensions(), (10, 10));
+    }
+
+    #[test]
+    fn test_normalize_frames_empty_vec() {
+        let normalized = normalize_frames(vec![], 10, 10);
+        assert!(normalized.is_empty());
+    }
+
+    #[test]
+    fn test_normalize_frames_mixed_sizes() {
+        let frames = vec![
+            DynamicImage::ImageRgba8(RgbaImage::new(4, 4)),
+            DynamicImage::ImageRgba8(RgbaImage::new(8, 12)),
+            DynamicImage::ImageRgba8(RgbaImage::new(40, 56)),
+        ];
+        let normalized = normalize_frames(frames, 40, 56);
+        for f in &normalized {
+            assert_eq!(f.dimensions(), (40, 56));
+        }
     }
 }

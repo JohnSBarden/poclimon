@@ -42,11 +42,40 @@ struct Cli {
 }
 
 /// A single creature slot in the multi-sprite display.
+///
+/// Holds pre-scaled, normalized frames for each animation state so the
+/// render loop never needs to resize images — only when the displayed frame
+/// index changes do we recreate the `StatefulProtocol`.
 struct CreatureSlot {
     creature_id: u32,
     creature_name: String,
     animator: Animator,
+    /// Pre-scaled and normalized frames for the Idle animation.
+    cached_idle: Vec<image::DynamicImage>,
+    /// Pre-scaled and normalized frames for the Eat animation.
+    cached_eat: Vec<image::DynamicImage>,
+    /// Pre-scaled and normalized frames for the Sleep animation.
+    cached_sleep: Vec<image::DynamicImage>,
+    /// The (state, frame_index) of the last rendered frame.
+    /// We only rebuild `current_frame` when this changes.
+    last_render_key: Option<(AnimationState, usize)>,
+    /// The current image protocol handed to ratatui-image.
     current_frame: Option<StatefulProtocol>,
+}
+
+impl CreatureSlot {
+    fn new(creature_id: u32, creature_name: String) -> Self {
+        Self {
+            creature_id,
+            creature_name,
+            animator: Animator::new(),
+            cached_idle: Vec::new(),
+            cached_eat: Vec::new(),
+            cached_sleep: Vec::new(),
+            last_render_key: None,
+            current_frame: None,
+        }
+    }
 }
 
 struct App {
@@ -54,6 +83,9 @@ struct App {
     slots: Vec<CreatureSlot>,
     selected: usize,
     running: bool,
+    /// Index into `creatures::ROSTER` used by the `A` key to track
+    /// the next creature to add (so it cycles rather than repeating).
+    next_add_index: usize,
 }
 
 impl App {
@@ -61,12 +93,7 @@ impl App {
         let slots: Vec<CreatureSlot> = config
             .roster
             .iter()
-            .map(|(id, name)| CreatureSlot {
-                creature_id: *id,
-                creature_name: name.clone(),
-                animator: Animator::new(),
-                current_frame: None,
-            })
+            .map(|(id, name)| CreatureSlot::new(*id, name.clone()))
             .collect();
 
         Self {
@@ -74,48 +101,48 @@ impl App {
             slots,
             selected: 0,
             running: true,
+            next_add_index: 0,
         }
     }
 
-    /// Load sprites for all creatures in the roster.
+    /// Load sprites for all creatures currently in the roster.
     fn load_all_sprites(&mut self, picker: &mut Picker) -> Result<()> {
-        for slot in &mut self.slots {
-            eprintln!("Downloading sprites for {}...", slot.creature_name);
-
-            let (anim_data_path, sheets) =
-                sprite::download_all_sprites(slot.creature_id)?;
-
-            let xml = std::fs::read_to_string(&anim_data_path)?;
-            let anim_infos = anim_data::parse_anim_data(&xml);
-
-            let idle_anim = load_animation("Idle", &sheets, &anim_infos)?;
-            let eat_anim = load_animation("Eat", &sheets, &anim_infos)?;
-            let sleep_anim = load_animation("Sleep", &sheets, &anim_infos)?;
-
-            slot.animator = Animator::new();
-            slot.animator.load_animations(idle_anim, eat_anim, sleep_anim);
+        for i in 0..self.slots.len() {
+            load_slot_sprites(&mut self.slots[i], self.config.scale)?;
         }
-
-        // Render first frames
+        // Render first frames for all slots.
         self.update_all_displays(picker);
         Ok(())
     }
 
-    /// Update all creature displays.
+    /// Tick all animators and rebuild `StatefulProtocol` only when the
+    /// displayed frame has actually changed.  This is the hot path —
+    /// no image resizing happens here.
     fn update_all_displays(&mut self, picker: &mut Picker) {
-        let scale = self.config.scale;
         for slot in &mut self.slots {
             slot.animator.tick();
-            if let Some(frame) = slot.animator.render_frame() {
-                let (w, h) = (frame.width(), frame.height());
-                let scaled = image::imageops::resize(
-                    frame,
-                    w * scale,
-                    h * scale,
-                    image::imageops::FilterType::Nearest,
-                );
+
+            let state = slot.animator.state();
+            let Some(frame_idx) = slot.animator.current_frame_index() else {
+                continue;
+            };
+
+            let render_key = (state, frame_idx);
+            if slot.last_render_key == Some(render_key) {
+                // Frame unchanged — no need to recreate the protocol.
+                continue;
+            }
+
+            let frames = match state {
+                AnimationState::Idle => &slot.cached_idle,
+                AnimationState::Eating => &slot.cached_eat,
+                AnimationState::Sleeping => &slot.cached_sleep,
+            };
+
+            if let Some(frame) = frames.get(frame_idx) {
                 slot.current_frame =
-                    Some(picker.new_resize_protocol(image::DynamicImage::ImageRgba8(scaled)));
+                    Some(picker.new_resize_protocol(frame.clone()));
+                slot.last_render_key = Some(render_key);
             }
         }
     }
@@ -147,14 +174,157 @@ impl App {
             slot.animator.set_state(state);
         }
     }
+
+    /// Add the next available creature (not already in roster) to the end.
+    ///
+    /// Cycles through `creatures::ROSTER` in order, skipping IDs already
+    /// present.  Does nothing when all creatures are already in the roster
+    /// or the roster is already at the display limit (6 slots).
+    fn add_creature(&mut self, picker: &mut Picker) {
+        // Cap at 6 for the grid renderer.
+        if self.slots.len() >= 6 {
+            return;
+        }
+
+        let current_ids: std::collections::HashSet<u32> =
+            self.slots.iter().map(|s| s.creature_id).collect();
+
+        // Find the next creature not already in the roster, starting from
+        // `next_add_index` and wrapping around ROSTER once.
+        let roster = creatures::ROSTER;
+        let start = self.next_add_index % roster.len();
+        let candidate = (start..roster.len())
+            .chain(0..start)
+            .find(|&i| !current_ids.contains(&roster[i].id));
+
+        let Some(idx) = candidate else {
+            // All ROSTER creatures are already on screen.
+            return;
+        };
+
+        let creature = &roster[idx];
+        self.next_add_index = (idx + 1) % roster.len();
+
+        let mut slot = CreatureSlot::new(creature.id, creature.name.to_string());
+        if load_slot_sprites(&mut slot, self.config.scale).is_ok() {
+            // Trigger immediate render for the first frame.
+            let state = slot.animator.state();
+            if let Some(frame_idx) = slot.animator.current_frame_index() {
+                let frames = match state {
+                    AnimationState::Idle => &slot.cached_idle,
+                    AnimationState::Eating => &slot.cached_eat,
+                    AnimationState::Sleeping => &slot.cached_sleep,
+                };
+                if let Some(frame) = frames.get(frame_idx) {
+                    slot.current_frame =
+                        Some(picker.new_resize_protocol(frame.clone()));
+                    slot.last_render_key = Some((state, frame_idx));
+                }
+            }
+            self.slots.push(slot);
+        }
+    }
+
+    /// Remove the currently selected slot from the roster.
+    ///
+    /// Silently does nothing if the roster would drop below 1 creature.
+    fn remove_selected(&mut self) {
+        if self.slots.len() <= 1 {
+            return;
+        }
+        self.slots.remove(self.selected);
+        // Keep `selected` in bounds.
+        if self.selected >= self.slots.len() {
+            self.selected = self.slots.len() - 1;
+        }
+    }
+
+    /// Cycle the creature in the selected slot through all `creatures::ROSTER`
+    /// entries, wrapping around. This may download and cache new sprites.
+    fn cycle_selected_creature(&mut self, picker: &mut Picker) {
+        let Some(slot) = self.slots.get(self.selected) else {
+            return;
+        };
+
+        let current_id = slot.creature_id;
+        let roster = creatures::ROSTER;
+
+        // Find the current position in ROSTER (fall back to 0 if not found).
+        let current_pos = roster
+            .iter()
+            .position(|c| c.id == current_id)
+            .unwrap_or(0);
+
+        let next_pos = (current_pos + 1) % roster.len();
+        let next = &roster[next_pos];
+
+        let mut new_slot = CreatureSlot::new(next.id, next.name.to_string());
+        if load_slot_sprites(&mut new_slot, self.config.scale).is_ok() {
+            // Trigger immediate render.
+            let state = new_slot.animator.state();
+            if let Some(frame_idx) = new_slot.animator.current_frame_index() {
+                let frames = match state {
+                    AnimationState::Idle => &new_slot.cached_idle,
+                    AnimationState::Eating => &new_slot.cached_eat,
+                    AnimationState::Sleeping => &new_slot.cached_sleep,
+                };
+                if let Some(frame) = frames.get(frame_idx) {
+                    new_slot.current_frame =
+                        Some(picker.new_resize_protocol(frame.clone()));
+                    new_slot.last_render_key = Some((state, frame_idx));
+                }
+            }
+            self.slots[self.selected] = new_slot;
+        }
+    }
 }
 
-/// Load an Animation from downloaded sprite sheets and parsed AnimData.
-fn load_animation(
+/// Download, parse, and cache all animation frames for a single slot.
+///
+/// Frames are pre-scaled by `scale` and normalized to the Idle animation's
+/// canonical dimensions so the render loop never has to resize.
+fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<()> {
+    let (anim_data_path, sheets) = sprite::download_all_sprites(slot.creature_id)?;
+
+    let xml = std::fs::read_to_string(&anim_data_path)?;
+    let anim_infos = anim_data::parse_anim_data(&xml);
+
+    // Load Idle first to establish the canonical frame size.
+    let (idle_anim, idle_w, idle_h) =
+        load_and_scale_animation("Idle", &sheets, &anim_infos, scale, None)?;
+
+    let (eat_anim, _, _) =
+        load_and_scale_animation("Eat", &sheets, &anim_infos, scale, Some((idle_w, idle_h)))?;
+
+    let (sleep_anim, _, _) =
+        load_and_scale_animation("Sleep", &sheets, &anim_infos, scale, Some((idle_w, idle_h)))?;
+
+    // Cache the scaled frames so the render loop never resizes.
+    slot.cached_idle = idle_anim.frames.clone();
+    slot.cached_eat = eat_anim.frames.clone();
+    slot.cached_sleep = sleep_anim.frames.clone();
+
+    slot.animator = Animator::new();
+    slot.animator.load_animations(idle_anim, eat_anim, sleep_anim);
+
+    // Invalidate any stale render key so the first frame is always drawn.
+    slot.last_render_key = None;
+    slot.current_frame = None;
+
+    Ok(())
+}
+
+/// Load an animation, pre-scale its frames by `scale`, then normalize them to
+/// `canonical_size` (if provided) using nearest-neighbor scaling.
+///
+/// Returns `(animation, frame_width_after_scale, frame_height_after_scale)`.
+fn load_and_scale_animation(
     anim_name: &str,
     sheets: &[(String, PathBuf)],
     anim_infos: &HashMap<String, AnimInfo>,
-) -> Result<Animation> {
+    scale: u32,
+    canonical_size: Option<(u32, u32)>,
+) -> Result<(Animation, u32, u32)> {
     let sheet_path = sheets
         .iter()
         .find(|(name, _)| name == anim_name)
@@ -162,23 +332,52 @@ fn load_animation(
 
     let anim_info = anim_infos.get(anim_name);
 
-    match (sheet_path, anim_info) {
+    let (raw_frames, durations) = match (sheet_path, anim_info) {
         (Some(path), Some(info)) => {
             let sheet = image::ImageReader::open(path)?.decode()?;
             let frames = sprite_sheet::extract_frames(&sheet, info);
-
             if frames.is_empty() {
                 let fallback = sprite::fallback::create_fallback_frame()?;
-                Ok(Animation::new(vec![fallback], &[20]))
+                (vec![fallback], vec![20u32])
             } else {
-                Ok(Animation::new(frames, &info.durations))
+                let durations = info.durations.clone();
+                (frames, durations)
             }
         }
         _ => {
             let fallback = sprite::fallback::create_fallback_frame()?;
-            Ok(Animation::new(vec![fallback], &[20]))
+            (vec![fallback], vec![20u32])
         }
-    }
+    };
+
+    // Step 1: scale by the display scale factor.
+    let scaled: Vec<image::DynamicImage> = raw_frames
+        .into_iter()
+        .map(|f| {
+            let (w, h) = (f.width() * scale, f.height() * scale);
+            image::DynamicImage::ImageRgba8(image::imageops::resize(
+                &f,
+                w,
+                h,
+                image::imageops::FilterType::Nearest,
+            ))
+        })
+        .collect();
+
+    // Record dimensions after scaling (before optional normalization).
+    let scaled_w = scaled.first().map(|f| f.width()).unwrap_or(0);
+    let scaled_h = scaled.first().map(|f| f.height()).unwrap_or(0);
+
+    // Step 2: normalize to the canonical size if provided.
+    let final_frames = match canonical_size {
+        Some((cw, ch)) => sprite_sheet::normalize_frames(scaled, cw, ch),
+        None => scaled,
+    };
+
+    let out_w = final_frames.first().map(|f| f.width()).unwrap_or(scaled_w);
+    let out_h = final_frames.first().map(|f| f.height()).unwrap_or(scaled_h);
+
+    Ok((Animation::new(final_frames, &durations), out_w, out_h))
 }
 
 fn main() -> Result<()> {
@@ -237,36 +436,44 @@ fn run_app(
         app.update_all_displays(picker);
         terminal.draw(|f| ui(f, app))?;
 
-        if event::poll(frame_duration)? {
-            if let Event::Key(KeyEvent {
+        if event::poll(frame_duration)?
+            && let Event::Key(KeyEvent {
                 code,
                 kind: KeyEventKind::Press,
                 ..
             }) = event::read()?
-            {
-                match code {
-                    KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
-                        app.running = false;
-                    }
-                    KeyCode::Char('e') | KeyCode::Char('E') => {
-                        app.set_selected_state(AnimationState::Eating);
-                    }
-                    KeyCode::Char('s') | KeyCode::Char('S') => {
-                        app.set_selected_state(AnimationState::Sleeping);
-                    }
-                    KeyCode::Char('i') | KeyCode::Char('I') => {
-                        app.set_selected_state(AnimationState::Idle);
-                    }
-                    KeyCode::Right => app.select_next(),
-                    KeyCode::Left => app.select_prev(),
-                    KeyCode::Char('1') => app.select_slot(0),
-                    KeyCode::Char('2') => app.select_slot(1),
-                    KeyCode::Char('3') => app.select_slot(2),
-                    KeyCode::Char('4') => app.select_slot(3),
-                    KeyCode::Char('5') => app.select_slot(4),
-                    KeyCode::Char('6') => app.select_slot(5),
-                    _ => {}
+        {
+            match code {
+                KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
+                    app.running = false;
                 }
+                KeyCode::Char('e') | KeyCode::Char('E') => {
+                    app.set_selected_state(AnimationState::Eating);
+                }
+                KeyCode::Char('s') | KeyCode::Char('S') => {
+                    app.set_selected_state(AnimationState::Sleeping);
+                }
+                KeyCode::Char('i') | KeyCode::Char('I') => {
+                    app.set_selected_state(AnimationState::Idle);
+                }
+                KeyCode::Char('a') | KeyCode::Char('A') => {
+                    app.add_creature(picker);
+                }
+                KeyCode::Char('r') | KeyCode::Char('R') => {
+                    app.remove_selected();
+                }
+                KeyCode::Tab => {
+                    app.cycle_selected_creature(picker);
+                }
+                KeyCode::Right => app.select_next(),
+                KeyCode::Left => app.select_prev(),
+                KeyCode::Char('1') => app.select_slot(0),
+                KeyCode::Char('2') => app.select_slot(1),
+                KeyCode::Char('3') => app.select_slot(2),
+                KeyCode::Char('4') => app.select_slot(3),
+                KeyCode::Char('5') => app.select_slot(4),
+                KeyCode::Char('6') => app.select_slot(5),
+                _ => {}
             }
         }
     }
@@ -282,8 +489,9 @@ fn ui(f: &mut Frame<'_>, app: &mut App) {
     ])
     .split(f.area());
 
-    // Title
-    let selected_name = app
+    // Title — collect the name up front so we don't hold a borrow into `app`
+    // across the mutable `render_creature_grid` call below.
+    let selected_name: String = app
         .slots
         .get(app.selected)
         .map(|s| s.creature_name.clone())
@@ -303,7 +511,7 @@ fn ui(f: &mut Frame<'_>, app: &mut App) {
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title("⚡ PoCLImon v0.1.0"),
+            .title("⚡ PoCLImon v0.0.2"),
     );
     f.render_widget(title, chunks[0]);
 
@@ -330,16 +538,18 @@ fn ui(f: &mut Frame<'_>, app: &mut App) {
     // Creature area — layout depends on count
     render_creature_grid(f, chunks[1], app);
     let status = Paragraph::new(Line::from(vec![
-        Span::raw(format!("{}: ", &selected_name)),
+        Span::raw(format!("{}: ", selected_name)),
         Span::styled(state_label, Style::default().fg(status_color)),
     ]))
     .block(Block::default().borders(Borders::ALL));
     f.render_widget(status, chunks[2]);
 
     // Help bar
-    let help = Paragraph::new("[E]at  [S]leep  [I]dle  [←/→]Select  [1-6]Slot  [Q]uit")
-        .style(Style::default().fg(Color::DarkGray))
-        .block(Block::default().borders(Borders::ALL));
+    let help = Paragraph::new(
+        "[E]at  [S]leep  [I]dle  [←/→]Select  [1-6]Slot  [A]dd  [R]emove  [Tab]Swap  [Q]uit",
+    )
+    .style(Style::default().fg(Color::DarkGray))
+    .block(Block::default().borders(Borders::ALL));
     f.render_widget(help, chunks[3]);
 }
 
@@ -378,7 +588,7 @@ fn render_creature_grid(f: &mut Frame<'_>, area: Rect, app: &mut App) {
         }
         4..=6 => {
             // 2 rows: top row gets ceil(count/2), bottom gets the rest
-            let top_count = (count + 1) / 2;
+            let top_count = count.div_ceil(2);
             let bot_count = count - top_count;
             let rows = Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .split(area);
@@ -460,4 +670,120 @@ fn centered_rect(area: Rect, max_width: u16, max_height: u16) -> Rect {
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     Rect::new(x, y, width, height)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a minimal `App` with a given roster (by creature IDs) without
+    /// downloading any sprites. Slots have no cached frames — that's fine for
+    /// logic-only tests.
+    fn make_app(ids: &[(u32, &str)]) -> App {
+        let roster = ids
+            .iter()
+            .map(|(id, name)| (*id, name.to_string()))
+            .collect();
+        let config = GameConfig {
+            scale: 1,
+            roster,
+        };
+        App::new(config)
+    }
+
+    // ── select_next / select_prev ──────────────────────────────────────────
+
+    #[test]
+    fn test_select_next_wraps() {
+        let mut app = make_app(&[(1, "Bulbasaur"), (4, "Charmander"), (7, "Squirtle")]);
+        assert_eq!(app.selected, 0);
+        app.select_next();
+        assert_eq!(app.selected, 1);
+        app.select_next();
+        assert_eq!(app.selected, 2);
+        app.select_next(); // wraps
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn test_select_prev_wraps() {
+        let mut app = make_app(&[(1, "Bulbasaur"), (4, "Charmander")]);
+        app.select_prev(); // 0 → last
+        assert_eq!(app.selected, 1);
+    }
+
+    // ── remove_selected ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_remove_selected_basic() {
+        let mut app = make_app(&[(1, "Bulbasaur"), (4, "Charmander"), (7, "Squirtle")]);
+        app.selected = 1;
+        app.remove_selected();
+        assert_eq!(app.slots.len(), 2);
+        assert_eq!(app.slots[0].creature_id, 1);
+        assert_eq!(app.slots[1].creature_id, 7);
+        // selected stays at 1 (now pointing to Squirtle)
+        assert_eq!(app.selected, 1);
+    }
+
+    #[test]
+    fn test_remove_selected_last_item_clamps() {
+        // Remove the last slot in a two-creature roster; selected must clamp.
+        let mut app = make_app(&[(1, "Bulbasaur"), (4, "Charmander")]);
+        app.selected = 1;
+        app.remove_selected();
+        assert_eq!(app.slots.len(), 1);
+        assert_eq!(app.selected, 0);
+    }
+
+    #[test]
+    fn test_remove_selected_noop_when_only_one() {
+        let mut app = make_app(&[(1, "Bulbasaur")]);
+        app.remove_selected();
+        assert_eq!(app.slots.len(), 1);
+    }
+
+    #[test]
+    fn test_remove_all_but_one_via_repeated_removes() {
+        let mut app = make_app(&[
+            (1, "Bulbasaur"),
+            (4, "Charmander"),
+            (7, "Squirtle"),
+        ]);
+        app.selected = 0;
+        app.remove_selected(); // removes Bulbasaur
+        assert_eq!(app.slots.len(), 2);
+        app.remove_selected(); // removes Charmander
+        assert_eq!(app.slots.len(), 1);
+        app.remove_selected(); // should be a no-op
+        assert_eq!(app.slots.len(), 1);
+    }
+
+    // ── set_selected_state ────────────────────────────────────────────────
+
+    #[test]
+    fn test_set_selected_state_changes_animator() {
+        let mut app = make_app(&[(1, "Bulbasaur"), (4, "Charmander")]);
+        app.selected = 0;
+        app.set_selected_state(AnimationState::Eating);
+        assert_eq!(app.slots[0].animator.state(), AnimationState::Eating);
+        // Slot 1 unaffected
+        assert_eq!(app.slots[1].animator.state(), AnimationState::Idle);
+    }
+
+    // ── select_slot ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_select_slot_in_bounds() {
+        let mut app = make_app(&[(1, "Bulbasaur"), (4, "Charmander"), (7, "Squirtle")]);
+        app.select_slot(2);
+        assert_eq!(app.selected, 2);
+    }
+
+    #[test]
+    fn test_select_slot_out_of_bounds_ignored() {
+        let mut app = make_app(&[(1, "Bulbasaur")]);
+        app.select_slot(5);
+        assert_eq!(app.selected, 0); // unchanged
+    }
 }
