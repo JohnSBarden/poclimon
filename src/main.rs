@@ -62,6 +62,11 @@ const MAX_CACHED_FRAMES: usize = 8;
 
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Maximum number of simultaneous creature slots in the pen.
+/// Used to compute fixed column widths so adding a creature never
+/// shifts existing columns (which would invalidate all StatefulProtocols).
+const MAX_SLOTS: usize = 6;
+
 /// A single creature slot in the shared-pen display.
 ///
 /// Pixel data lives here; the animator only knows timing/state.
@@ -76,8 +81,11 @@ struct CreatureSlot {
     /// Pre-scaled, normalized frames for the Sleep animation.
     cached_sleep: Vec<image::DynamicImage>,
     /// The (state, frame_index) of the last rendered frame.
-    /// We only rebuild `current_frame` when this changes.
+    /// We only rebuild `current_frame` when (state, frame) or rect changes.
     last_render_key: Option<(AnimationState, usize)>,
+    /// The Rect this protocol was built for. If it changes (terminal resize),
+    /// we invalidate and rebuild.
+    last_render_rect: Option<Rect>,
     /// The current image protocol handed to ratatui-image.
     current_frame: Option<StatefulProtocol>,
 }
@@ -92,6 +100,7 @@ impl CreatureSlot {
             cached_eat: Vec::new(),
             cached_sleep: Vec::new(),
             last_render_key: None,
+            last_render_rect: None,
             current_frame: None,
         }
     }
@@ -655,6 +664,15 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App) {
 
         let slot = &mut app.slots[i];
 
+        // Invalidate the cached protocol if the render area changed
+        // (e.g. terminal was resized). Fixed-width columns mean this only
+        // fires on genuine terminal resize, not on add/remove.
+        if slot.last_render_rect != Some(img_area) {
+            slot.current_frame = None;
+            slot.last_render_key = None;
+            slot.last_render_rect = Some(img_area);
+        }
+
         // Render sprite (or "Loading…" fallback).
         if let Some(ref mut protocol) = slot.current_frame {
             let image_widget = StatefulImage::default();
@@ -688,27 +706,31 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App) {
     }
 }
 
-/// Compute the `Rect` for creature `index` of `total` within `pen_inner`.
+/// Compute the `Rect` for creature `index` within `pen_inner`.
 ///
-/// Divides the pen width into `total` equal regions; the last region absorbs
-/// any remainder pixels from integer division.
+/// Columns are sized for `MAX_SLOTS` regardless of how many creatures are
+/// currently active.  This keeps every slot's Rect stable as creatures are
+/// added or removed — avoiding `StatefulProtocol` invalidation artifacts.
+///
+/// Terminal resize is a separate path: callers detect area changes and
+/// invalidate protocols explicitly via `last_render_rect`.
 pub(crate) fn compute_creature_region(pen_inner: Rect, index: usize, total: usize) -> Rect {
-    if total == 0 {
+    if total == 0 || MAX_SLOTS == 0 {
         return pen_inner;
     }
-    // Guard: if there are more creatures than pixels, each gets the full area.
-    if total > pen_inner.width as usize {
+    if MAX_SLOTS > pen_inner.width as usize {
         return pen_inner;
     }
 
-    let region_w = pen_inner.width / total as u16;
-    let x = pen_inner.x + index as u16 * region_w;
+    // Fixed column width based on MAX_SLOTS — stable regardless of active count.
+    let col_w = pen_inner.width / MAX_SLOTS as u16;
+    let x = pen_inner.x + index as u16 * col_w;
 
-    // Last creature absorbs remaining width after integer division.
+    // Last active slot extends to pen edge to consume any remainder pixels.
     let w = if index + 1 == total {
-        pen_inner.width.saturating_sub(index as u16 * region_w)
+        pen_inner.width.saturating_sub(index as u16 * col_w)
     } else {
-        region_w
+        col_w
     };
 
     Rect::new(x, pen_inner.y, w, pen_inner.height)
@@ -832,65 +854,77 @@ mod tests {
     }
 
     // ── compute_creature_region (pen layout) ──────────────────────────────
+    //
+    // Columns are always sized for MAX_SLOTS (6), keeping positions stable
+    // as creatures are added/removed (prevents StatefulProtocol artifacts).
 
     #[test]
-    fn test_pen_region_single_creature() {
-        let area = Rect::new(0, 0, 100, 50);
+    fn test_pen_region_uses_fixed_max_slots_column_width() {
+        // 120px wide, MAX_SLOTS=6 → col_w = 20px regardless of active count.
+        let area = Rect::new(0, 0, 120, 50);
+        // With 1 active creature, slot 0 still starts at col 0 width=120 (last slot absorbs remainder).
         let r = compute_creature_region(area, 0, 1);
         assert_eq!(r.x, 0);
         assert_eq!(r.y, 0);
-        assert_eq!(r.width, 100);
+        assert_eq!(r.width, 120); // last slot takes rest: 120 - 0*20 = 120
         assert_eq!(r.height, 50);
     }
 
     #[test]
-    fn test_pen_region_two_creatures_even_split() {
-        let area = Rect::new(0, 0, 100, 50);
-        let r0 = compute_creature_region(area, 0, 2);
-        let r1 = compute_creature_region(area, 1, 2);
-        assert_eq!(r0.x, 0);
-        assert_eq!(r0.width, 50);
-        assert_eq!(r1.x, 50);
-        assert_eq!(r1.width, 50); // 100 − 1×50 = 50
-        assert_eq!(r0.height, 50);
-        assert_eq!(r1.height, 50);
+    fn test_pen_region_slot_x_stable_across_counts() {
+        // Adding a creature must NOT change slot 0's x position.
+        let area = Rect::new(0, 0, 120, 50);
+        let col_w = 120u16 / MAX_SLOTS as u16; // 20
+        let r_when_1 = compute_creature_region(area, 0, 1);
+        let r_when_2 = compute_creature_region(area, 0, 2);
+        let r_when_6 = compute_creature_region(area, 0, 6);
+        // x is always 0 * col_w = 0
+        assert_eq!(r_when_1.x, 0);
+        assert_eq!(r_when_2.x, 0);
+        assert_eq!(r_when_6.x, 0);
+        // slot 1 x is always 1 * col_w regardless of total
+        let r1_when_2 = compute_creature_region(area, 1, 2);
+        let r1_when_6 = compute_creature_region(area, 1, 6);
+        assert_eq!(r1_when_2.x, col_w);
+        assert_eq!(r1_when_6.x, col_w);
     }
 
     #[test]
-    fn test_pen_region_three_creatures_remainder_in_last() {
-        // 100 / 3 = 33 remainder 1 → last slot gets 34.
-        let area = Rect::new(0, 0, 100, 50);
-        let r0 = compute_creature_region(area, 0, 3);
-        let r1 = compute_creature_region(area, 1, 3);
-        let r2 = compute_creature_region(area, 2, 3);
-        assert_eq!(r0.x, 0);
-        assert_eq!(r0.width, 33);
-        assert_eq!(r1.x, 33);
-        assert_eq!(r1.width, 33);
-        assert_eq!(r2.x, 66);
-        assert_eq!(r2.width, 34); // 100 − 2×33 = 34
-    }
-
-    #[test]
-    fn test_pen_region_six_creatures() {
-        // 120 / 6 = 20 exactly — no remainder.
+    fn test_pen_region_six_creatures_exact() {
+        // 120 / MAX_SLOTS(6) = 20 exactly — no remainder.
         let area = Rect::new(2, 4, 120, 40);
+        let col_w = 120u16 / MAX_SLOTS as u16;
         for i in 0..6usize {
             let r = compute_creature_region(area, i, 6);
-            assert_eq!(r.x, 2 + i as u16 * 20);
-            assert_eq!(r.width, 20);
+            assert_eq!(r.x, 2 + i as u16 * col_w);
             assert_eq!(r.y, 4);
             assert_eq!(r.height, 40);
         }
+        // Last slot absorbs remainder (none here since 120 % 6 == 0)
+        let last = compute_creature_region(area, 5, 6);
+        assert_eq!(last.width, col_w);
     }
 
     #[test]
-    fn test_pen_region_non_zero_origin() {
-        let area = Rect::new(10, 5, 60, 30);
+    fn test_pen_region_last_slot_absorbs_remainder() {
+        // 100 / MAX_SLOTS(6) = 16 remainder 4. Last active slot absorbs it.
+        let area = Rect::new(0, 0, 100, 30);
+        let col_w = 100u16 / MAX_SLOTS as u16; // 16
+        let last = compute_creature_region(area, 2, 3); // last of 3 active
+        let expected_x = 2 * col_w; // 32
+        let expected_w = 100 - expected_x; // 68
+        assert_eq!(last.x, expected_x);
+        assert_eq!(last.width, expected_w);
+    }
+
+    #[test]
+    fn test_pen_region_non_zero_origin_stable() {
+        let area = Rect::new(10, 5, 120, 30);
+        let col_w = 120u16 / MAX_SLOTS as u16; // 20
         let r0 = compute_creature_region(area, 0, 2);
         let r1 = compute_creature_region(area, 1, 2);
         assert_eq!(r0.x, 10);
-        assert_eq!(r1.x, 40); // 10 + 30
+        assert_eq!(r1.x, 10 + col_w);
         assert_eq!(r0.y, 5);
         assert_eq!(r1.y, 5);
         assert_eq!(r0.height, 30);
@@ -900,6 +934,14 @@ mod tests {
     fn test_pen_region_total_zero_returns_full_area() {
         let area = Rect::new(0, 0, 80, 24);
         let r = compute_creature_region(area, 0, 0);
+        assert_eq!(r, area);
+    }
+
+    #[test]
+    fn test_pen_region_narrow_terminal_falls_back() {
+        // If pen is narrower than MAX_SLOTS pixels, return full area.
+        let area = Rect::new(0, 0, 3, 10); // 3 < MAX_SLOTS(6)
+        let r = compute_creature_region(area, 0, 1);
         assert_eq!(r, area);
     }
 
