@@ -1,1 +1,20 @@
+# Rust / Cargo
 /target
+**/*.rs.bk
+*.pdb
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment
+.env
+.env.*
+
+# PoCLImon runtime
+.poclimon/
