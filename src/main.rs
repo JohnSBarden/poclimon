@@ -23,11 +23,11 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame, Terminal,
 };
-use ratatui_image::{picker::Picker, protocol::StatefulProtocol, StatefulImage};
-use std::collections::HashMap;
+use ratatui_image::{picker::Picker, protocol::Protocol, Image, Resize};
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Parser)]
 #[command(version, about = "PoCLImon - A terminal-based creature virtual pet")]
@@ -52,9 +52,14 @@ struct Cli {
 //   2. Frame cap at 8 per animation: limits long PMDCollab animations.
 //   3. `Animation` is now timing-only — no pixel data. Frames live exclusively
 //      in `CreatureSlot::cached_*`.  Double-storage eliminated.
+//   4. Protocol pre-encoding: switch from StatefulProtocol (stores full
+//      DynamicImage in the protocol) to Protocol (stores only encoded halfblock
+//      data). All frames are encoded once for a given Rect and reused every
+//      frame, eliminating alloc/free churn.
 //
 // Expected working set at scale=3, ≤8 frames, 5 creatures:
-//   120×168×4 ≈ 80 KB/frame × 8 frames × 3 anims × 5 creatures ≈ 9.6 MB peak.
+//   ~40 KB/encoded-frame × 8 frames × 3 anims × 5 creatures ≈ 4.8 MB total.
+//   Zero DynamicImage copies held in protocol objects.
 
 /// Maximum frames to cache per animation.  If the sprite sheet has more,
 /// we sample evenly-spaced frames so the animation still looks smooth.
@@ -64,8 +69,36 @@ const MAX_CACHED_FRAMES: usize = 8;
 
 /// Maximum number of simultaneous creature slots in the pen.
 /// Used to compute fixed column widths so adding a creature never
-/// shifts existing columns (which would invalidate all StatefulProtocols).
+/// shifts existing columns (which would invalidate all encoded Protocols).
 const MAX_SLOTS: usize = 6;
+
+// ── Notification system ────────────────────────────────────────────────────────
+
+/// Maximum number of notifications to keep in the deque at once.
+const MAX_NOTIFICATIONS: usize = 5;
+
+/// How long (seconds) before a notification expires from the display.
+const NOTIF_TTL_SECS: u64 = 8;
+
+/// Severity level for an in-TUI notification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NotifLevel {
+    // Info is currently used in tests and reserved for future informational
+    // messages (e.g., successful sprite downloads).
+    #[allow(dead_code)]
+    Info,
+    Warn,
+    Error,
+}
+
+/// A single in-TUI notification message.
+struct Notification {
+    message: String,
+    level: NotifLevel,
+    created_at: Instant,
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 
 /// A single creature slot in the shared-pen display.
 ///
@@ -80,14 +113,13 @@ struct CreatureSlot {
     cached_eat: Vec<image::DynamicImage>,
     /// Pre-scaled, normalized frames for the Sleep animation.
     cached_sleep: Vec<image::DynamicImage>,
-    /// The (state, frame_index) of the last rendered frame.
-    /// We only rebuild `current_frame` when (state, frame) or rect changes.
-    last_render_key: Option<(AnimationState, usize)>,
-    /// The Rect this protocol was built for. If it changes (terminal resize),
-    /// we invalidate and rebuild.
-    last_render_rect: Option<Rect>,
-    /// The current image protocol handed to ratatui-image.
-    current_frame: Option<StatefulProtocol>,
+    /// Pre-encoded Protocol objects, indexed by [state_index][frame_index].
+    /// state 0 = Idle, 1 = Eat, 2 = Sleep.
+    /// `None` entries mean encoding failed for that frame (fallback shown).
+    /// Rebuilt whenever `encoded_rect` changes (terminal resize or first render).
+    encoded_frames: [Vec<Option<Protocol>>; 3],
+    /// The `Rect` these protocols were encoded for. `None` means not yet encoded.
+    encoded_rect: Option<Rect>,
 }
 
 impl CreatureSlot {
@@ -99,9 +131,8 @@ impl CreatureSlot {
             cached_idle: Vec::new(),
             cached_eat: Vec::new(),
             cached_sleep: Vec::new(),
-            last_render_key: None,
-            last_render_rect: None,
-            current_frame: None,
+            encoded_frames: [Vec::new(), Vec::new(), Vec::new()],
+            encoded_rect: None,
         }
     }
 }
@@ -114,6 +145,8 @@ struct App {
     /// Index into `creatures::ROSTER` used by the `A` key to track
     /// the next creature to add (so it cycles rather than repeating).
     next_add_index: usize,
+    /// In-TUI notification messages (replaces eprintln! during TUI operation).
+    notifications: VecDeque<Notification>,
 }
 
 impl App {
@@ -130,24 +163,64 @@ impl App {
             selected: 0,
             running: true,
             next_add_index: 0,
+            notifications: VecDeque::new(),
         }
+    }
+
+    /// Post a notification to the in-TUI message log.
+    ///
+    /// Displayed in the status+notifications panel. If the deque is at
+    /// capacity, the oldest entry is dropped to make room.
+    fn notify(&mut self, level: NotifLevel, message: impl Into<String>) {
+        if self.notifications.len() >= MAX_NOTIFICATIONS {
+            self.notifications.pop_front();
+        }
+        self.notifications.push_back(Notification {
+            message: message.into(),
+            level,
+            created_at: Instant::now(),
+        });
+    }
+
+    /// Expire notifications older than `ttl`.
+    ///
+    /// Separated from `update_all_displays` so tests can pass a custom TTL.
+    fn expire_notifications(&mut self, ttl: Duration) {
+        self.notifications.retain(|n| n.created_at.elapsed() < ttl);
     }
 
     /// Load sprites for all creatures currently in the roster.
-    fn load_all_sprites(&mut self) -> Result<()> {
+    ///
+    /// Errors and sprite warnings are posted as notifications rather than
+    /// written to stderr (which would corrupt the TUI canvas).
+    fn load_all_sprites(&mut self) {
         for i in 0..self.slots.len() {
-            load_slot_sprites(&mut self.slots[i], self.config.scale)?;
+            match load_slot_sprites(&mut self.slots[i], self.config.scale) {
+                Ok(warnings) => {
+                    for w in warnings {
+                        self.notify(NotifLevel::Warn, w);
+                    }
+                }
+                Err(e) => {
+                    let name = self.slots[i].creature_name.clone();
+                    self.notify(
+                        NotifLevel::Error,
+                        format!("Failed to load {}: {}", name, e),
+                    );
+                }
+            }
         }
-        Ok(())
     }
 
-    /// Tick all animators. Protocol creation is deferred to `render_pen`
-    /// where the actual `Rect` is known — avoids wasted allocations when the
-    /// rect hasn't been determined yet (startup, new slots).
+    /// Tick all animators and expire stale notifications.
+    ///
+    /// Protocol encoding is deferred to `render_pen` where the actual
+    /// `Rect` is known — avoids wasted allocations before the first draw.
     fn update_all_displays(&mut self) {
         for slot in &mut self.slots {
             slot.animator.tick();
         }
+        self.expire_notifications(Duration::from_secs(NOTIF_TTL_SECS));
     }
 
     fn select_next(&mut self) {
@@ -209,9 +282,20 @@ impl App {
         self.next_add_index = (idx + 1) % roster.len();
 
         let mut slot = CreatureSlot::new(creature.id, creature.name.to_string());
-        if load_slot_sprites(&mut slot, self.config.scale).is_ok() {
-            // Protocol will be built on first render pass in render_pen.
-            self.slots.push(slot);
+        match load_slot_sprites(&mut slot, self.config.scale) {
+            Ok(warnings) => {
+                for w in warnings {
+                    self.notify(NotifLevel::Warn, w);
+                }
+                // Protocol will be built on first render pass in render_pen.
+                self.slots.push(slot);
+            }
+            Err(e) => {
+                self.notify(
+                    NotifLevel::Error,
+                    format!("Failed to add {}: {}", creature.name, e),
+                );
+            }
         }
     }
 
@@ -248,9 +332,20 @@ impl App {
         let next = &roster[next_pos];
 
         let mut new_slot = CreatureSlot::new(next.id, next.name.to_string());
-        if load_slot_sprites(&mut new_slot, self.config.scale).is_ok() {
-            // Protocol will be built on first render pass in render_pen.
-            self.slots[self.selected] = new_slot;
+        match load_slot_sprites(&mut new_slot, self.config.scale) {
+            Ok(warnings) => {
+                for w in warnings {
+                    self.notify(NotifLevel::Warn, w);
+                }
+                // Protocol will be built on first render pass in render_pen.
+                self.slots[self.selected] = new_slot;
+            }
+            Err(e) => {
+                self.notify(
+                    NotifLevel::Error,
+                    format!("Failed to swap to {}: {}", next.name, e),
+                );
+            }
         }
     }
 }
@@ -290,8 +385,12 @@ fn cap_frames(
 /// Frames are pre-scaled by `scale` and normalized to the Idle animation's
 /// canonical dimensions so the render loop never has to resize.
 /// Frames live only in `slot.cached_*`; the `Animator` holds timing only.
-fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<()> {
-    let (anim_data_path, sheets) = sprite::download_all_sprites(slot.creature_id)?;
+///
+/// Returns a Vec of non-fatal warning strings (e.g., a missing animation
+/// sheet that was replaced with a fallback). These are shown as in-TUI
+/// notifications rather than written to stderr.
+fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<String>> {
+    let (anim_data_path, sheets, warnings) = sprite::download_all_sprites(slot.creature_id)?;
 
     let xml = std::fs::read_to_string(&anim_data_path)?;
     let anim_infos = anim_data::parse_anim_data(&xml);
@@ -315,11 +414,11 @@ fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<()> {
     slot.animator = Animator::new();
     slot.animator.load_animations(idle_timing, eat_timing, sleep_timing);
 
-    // Invalidate any stale render key so the first frame is always drawn.
-    slot.last_render_key = None;
-    slot.current_frame = None;
+    // Invalidate encoded frames so the first render re-encodes for the actual Rect.
+    slot.encoded_rect = None;
+    slot.encoded_frames = [Vec::new(), Vec::new(), Vec::new()];
 
-    Ok(())
+    Ok(warnings)
 }
 
 /// Load an animation, pre-scale its frames by `scale`, cap to
@@ -395,6 +494,43 @@ fn load_and_scale_animation(
     Ok((final_frames, timing, out_w, out_h))
 }
 
+// ── Protocol encoding ──────────────────────────────────────────────────────────
+
+/// Pre-encode all animation frames for a slot into non-stateful `Protocol`
+/// objects sized for `area`.
+///
+/// Called lazily from `render_pen` whenever the render `Rect` changes
+/// (terminal resize) or on the first render.  After this call, rendering
+/// a frame is a cheap table lookup — no DynamicImage copies, no alloc/free
+/// churn.
+///
+/// Memory: each `Protocol::Halfblocks` stores only `Vec<HalfBlock>` + a
+/// `Rect`, no source image.  8 frames × 3 states × 6 slots ≈ 5.8 MB total.
+fn encode_all_frames(slot: &mut CreatureSlot, picker: &Picker, area: Rect) {
+    // Collect each state's encoded frames sequentially to avoid simultaneous
+    // shared+mutable borrows of `slot`.
+    let idle_encoded: Vec<Option<Protocol>> = slot
+        .cached_idle
+        .iter()
+        .map(|img| picker.new_protocol(img.clone(), area, Resize::Fit(None)).ok())
+        .collect();
+
+    let eat_encoded: Vec<Option<Protocol>> = slot
+        .cached_eat
+        .iter()
+        .map(|img| picker.new_protocol(img.clone(), area, Resize::Fit(None)).ok())
+        .collect();
+
+    let sleep_encoded: Vec<Option<Protocol>> = slot
+        .cached_sleep
+        .iter()
+        .map(|img| picker.new_protocol(img.clone(), area, Resize::Fit(None)).ok())
+        .collect();
+
+    slot.encoded_frames = [idle_encoded, eat_encoded, sleep_encoded];
+    slot.encoded_rect = Some(area);
+}
+
 // ── Application entry point ────────────────────────────────────────────────────
 
 fn main() -> Result<()> {
@@ -405,6 +541,7 @@ fn main() -> Result<()> {
         match GameConfig::from_creature_name(name) {
             Ok(c) => c,
             Err(e) => {
+                // TUI not yet active; eprintln! is safe here.
                 eprintln!("Warning: {} — using default", e);
                 GameConfig::default()
             }
@@ -425,9 +562,9 @@ fn main() -> Result<()> {
 
     let mut app = App::new(config);
 
-    if let Err(e) = app.load_all_sprites() {
-        eprintln!("Failed to load sprites: {}", e);
-    }
+    // TUI is now active — sprite load failures become in-TUI notifications
+    // rather than eprintln! (which would corrupt the alternate screen).
+    app.load_all_sprites();
 
     let res = run_app(&mut terminal, &mut app, &mut picker);
 
@@ -436,6 +573,7 @@ fn main() -> Result<()> {
     terminal.show_cursor()?;
 
     if let Err(e) = res {
+        // TUI has been torn down; eprintln! is safe here.
         eprintln!("Error: {}", e);
     }
 
@@ -503,7 +641,7 @@ fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker) {
     let chunks = Layout::vertical([
         Constraint::Length(3), // Title bar
         Constraint::Min(10),   // Pen (shared creature canvas)
-        Constraint::Length(3), // Status bar
+        Constraint::Length(5), // Status + notifications (3 inner rows)
         Constraint::Length(3), // Help bar
     ])
     .split(f.area());
@@ -557,11 +695,27 @@ fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker) {
     // Shared pen — all creatures on one open canvas.
     render_pen(f, chunks[1], app, picker);
 
-    let status = Paragraph::new(Line::from(vec![
+    // Status + notification panel.
+    // Line 0: current creature state.
+    // Lines 1–2: most recent notifications, newest first.
+    let mut status_lines = vec![Line::from(vec![
         Span::raw(format!("{}: ", selected_name)),
         Span::styled(state_label, Style::default().fg(status_color)),
-    ]))
-    .block(Block::default().borders(Borders::ALL));
+    ])];
+
+    for notif in app.notifications.iter().rev().take(2) {
+        let (prefix, color) = match notif.level {
+            NotifLevel::Error => ("[Error] ", Color::Red),
+            NotifLevel::Warn => ("[Warn]  ", Color::Yellow),
+            NotifLevel::Info => ("[Info]  ", Color::DarkGray),
+        };
+        status_lines.push(Line::from(vec![
+            Span::styled(prefix, Style::default().fg(color)),
+            Span::styled(notif.message.clone(), Style::default().fg(color)),
+        ]));
+    }
+
+    let status = Paragraph::new(status_lines).block(Block::default().borders(Borders::ALL));
     f.render_widget(status, chunks[2]);
 
     // Help bar
@@ -580,6 +734,9 @@ fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker) {
 /// A single outer border wraps the pen area.  Creatures are spaced evenly
 /// along the horizontal axis; a name label below each sprite acts as the
 /// selection indicator (Yellow + ▲ for selected, DarkGray for others).
+///
+/// Protocols are pre-encoded on first render for a given `Rect` and reused
+/// each frame (zero alloc/free churn during animation).
 fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker) {
     let count = app.slots.len();
     if count == 0 {
@@ -587,9 +744,7 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
     }
 
     // Single outer border — no inner dividers.
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("🌿 Pen");
+    let block = Block::default().borders(Borders::ALL).title("🌿 Pen");
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -612,37 +767,31 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
 
         let slot = &mut app.slots[i];
 
-        // Build (or rebuild) the StatefulProtocol here, where the Rect is
-        // known. Rebuild only when the (state, frame_index) pair changes OR
-        // the render area changes (terminal resize). This is the single source
-        // of protocol creation — update_all_displays only ticks animators.
-        let state = slot.animator.state();
-        let frame_idx = slot.animator.current_frame_index().unwrap_or(0);
-        let render_key = (state, frame_idx);
-        let rect_changed = slot.last_render_rect != Some(img_area);
-        let frame_changed = slot.last_render_key != Some(render_key);
-
-        if rect_changed || frame_changed {
-            let frames = match state {
-                AnimationState::Idle => &slot.cached_idle,
-                AnimationState::Eating => &slot.cached_eat,
-                AnimationState::Sleeping => &slot.cached_sleep,
-            };
-            if let Some(frame) = frames.get(frame_idx) {
-                slot.current_frame = Some(picker.new_resize_protocol(frame.clone()));
-                slot.last_render_key = Some(render_key);
-                slot.last_render_rect = Some(img_area);
-            }
+        // Lazily encode all frames for this slot when the render Rect changes
+        // (first render or terminal resize). This is the ONLY place protocols
+        // are created — update_all_displays only ticks animators.
+        if slot.encoded_rect != Some(img_area) {
+            encode_all_frames(slot, picker, img_area);
         }
 
+        let state = slot.animator.state();
+        let frame_idx = slot.animator.current_frame_index().unwrap_or(0);
+        let state_idx = match state {
+            AnimationState::Idle => 0,
+            AnimationState::Eating => 1,
+            AnimationState::Sleeping => 2,
+        };
+
         // Render sprite (or "Loading…" fallback).
-        if let Some(ref mut protocol) = slot.current_frame {
-            let image_widget = StatefulImage::default();
-            f.render_stateful_widget(image_widget, img_area, protocol);
-        } else {
-            let fallback = Paragraph::new("Loading…")
-                .style(Style::default().fg(Color::DarkGray));
-            f.render_widget(fallback, img_area);
+        match slot.encoded_frames[state_idx]
+            .get_mut(frame_idx)
+            .and_then(|opt| opt.as_mut())
+        {
+            Some(protocol) => f.render_widget(Image::new(protocol), img_area),
+            None => f.render_widget(
+                Paragraph::new("Loading…").style(Style::default().fg(Color::DarkGray)),
+                img_area,
+            ),
         }
 
         // Name label — selection indicator without borders.
@@ -672,10 +821,10 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
 ///
 /// Columns are sized for `MAX_SLOTS` regardless of how many creatures are
 /// currently active.  This keeps every slot's Rect stable as creatures are
-/// added or removed — avoiding `StatefulProtocol` invalidation artifacts.
+/// added or removed — avoiding encoded `Protocol` invalidation artifacts.
 ///
 /// Terminal resize is a separate path: callers detect area changes and
-/// invalidate protocols explicitly via `last_render_rect`.
+/// invalidate protocols explicitly via `encoded_rect`.
 pub(crate) fn compute_creature_region(pen_inner: Rect, index: usize, total: usize) -> Rect {
     if total == 0 || MAX_SLOTS == 0 {
         return pen_inner;
@@ -712,10 +861,7 @@ mod tests {
             .iter()
             .map(|(id, name)| (*id, name.to_string()))
             .collect();
-        let config = GameConfig {
-            scale: 1,
-            roster,
-        };
+        let config = GameConfig { scale: 1, roster };
         App::new(config)
     }
 
@@ -818,7 +964,7 @@ mod tests {
     // ── compute_creature_region (pen layout) ──────────────────────────────
     //
     // Columns are always sized for MAX_SLOTS (6), keeping positions stable
-    // as creatures are added/removed (prevents StatefulProtocol artifacts).
+    // as creatures are added/removed (prevents Protocol encoding invalidation).
 
     #[test]
     fn test_pen_region_uses_fixed_max_slots_column_width() {
@@ -911,9 +1057,7 @@ mod tests {
 
     fn blank_frames(n: usize) -> Vec<image::DynamicImage> {
         (0..n)
-            .map(|_| {
-                image::DynamicImage::ImageRgba8(image::RgbaImage::new(4, 4))
-            })
+            .map(|_| image::DynamicImage::ImageRgba8(image::RgbaImage::new(4, 4)))
             .collect()
     }
 
@@ -971,5 +1115,69 @@ mod tests {
         assert_eq!(cf.len(), 3);
         assert_eq!(cd.len(), 3);
         assert_eq!(cd, vec![10, 20, 30]);
+    }
+
+    // ── notifications ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_notify_adds_to_deque() {
+        let mut app = make_app(&[(1, "Bulbasaur")]);
+        assert!(app.notifications.is_empty());
+        app.notify(NotifLevel::Info, "hello world");
+        assert_eq!(app.notifications.len(), 1);
+        assert_eq!(app.notifications.front().unwrap().message, "hello world");
+        assert_eq!(app.notifications.front().unwrap().level, NotifLevel::Info);
+    }
+
+    #[test]
+    fn test_notify_all_levels() {
+        let mut app = make_app(&[(1, "Bulbasaur")]);
+        app.notify(NotifLevel::Info, "info");
+        app.notify(NotifLevel::Warn, "warn");
+        app.notify(NotifLevel::Error, "error");
+        assert_eq!(app.notifications.len(), 3);
+        let levels: Vec<NotifLevel> = app.notifications.iter().map(|n| n.level).collect();
+        assert_eq!(levels, vec![NotifLevel::Info, NotifLevel::Warn, NotifLevel::Error]);
+    }
+
+    #[test]
+    fn test_notify_max_capacity_drops_oldest() {
+        let mut app = make_app(&[(1, "Bulbasaur")]);
+        // Fill to capacity
+        for i in 0..MAX_NOTIFICATIONS {
+            app.notify(NotifLevel::Info, format!("msg {}", i));
+        }
+        assert_eq!(app.notifications.len(), MAX_NOTIFICATIONS);
+        assert_eq!(app.notifications.front().unwrap().message, "msg 0");
+
+        // Adding one more should drop "msg 0"
+        app.notify(NotifLevel::Warn, format!("msg {}", MAX_NOTIFICATIONS));
+        assert_eq!(app.notifications.len(), MAX_NOTIFICATIONS);
+        assert_eq!(app.notifications.front().unwrap().message, "msg 1");
+        assert_eq!(
+            app.notifications.back().unwrap().message,
+            format!("msg {}", MAX_NOTIFICATIONS)
+        );
+    }
+
+    #[test]
+    fn test_notifications_expire_with_zero_ttl() {
+        let mut app = make_app(&[(1, "Bulbasaur")]);
+        app.notify(NotifLevel::Error, "oops");
+        app.notify(NotifLevel::Warn, "hmm");
+        assert_eq!(app.notifications.len(), 2);
+        // Duration::ZERO forces all notifications to be "expired" since
+        // elapsed() >= 0 and 0 < 0 is false → retain keeps nothing.
+        app.expire_notifications(Duration::ZERO);
+        assert_eq!(app.notifications.len(), 0);
+    }
+
+    #[test]
+    fn test_notifications_not_expired_with_long_ttl() {
+        let mut app = make_app(&[(1, "Bulbasaur")]);
+        app.notify(NotifLevel::Info, "stays");
+        // Very long TTL — notifications should NOT be expired
+        app.expire_notifications(Duration::from_secs(9999));
+        assert_eq!(app.notifications.len(), 1);
     }
 }
