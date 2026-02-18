@@ -5,8 +5,15 @@
 //!
 //! Each animation state (Idle, Eating, Sleeping) plays a corresponding
 //! sprite sheet animation. All states loop infinitely.
+//!
+//! # Memory layout
+//!
+//! `Animation` is **timing-only** — it tracks frame durations but stores
+//! no pixel data. Actual frame images live exclusively in `CreatureSlot`'s
+//! `cached_idle / cached_eat / cached_sleep` vectors. This eliminates the
+//! double-storage that existed in v0.0.2, where frames were kept both in
+//! `Animator.idle_anim.frames` and in the slot cache.
 
-use image::DynamicImage;
 use std::time::Instant;
 
 /// The creature's current animation state.
@@ -17,11 +24,11 @@ pub enum AnimationState {
     Sleeping,
 }
 
-/// A loaded animation: its frames and per-frame timing.
+/// Timing information for one animation cycle (no pixel data stored here).
+///
+/// Frame images are stored separately in `CreatureSlot::cached_*`.
 #[derive(Clone)]
 pub struct Animation {
-    /// Individual frames extracted from the sprite sheet (row 0 only).
-    pub frames: Vec<DynamicImage>,
     /// Duration of each frame in milliseconds.
     pub durations_ms: Vec<u64>,
     /// Total duration of one cycle in milliseconds.
@@ -29,11 +36,13 @@ pub struct Animation {
 }
 
 impl Animation {
-    /// Create a new Animation from frames and tick durations.
-    /// `tick_durations` are in game ticks (1 tick ≈ 50ms).
-    pub fn new(frames: Vec<DynamicImage>, tick_durations: &[u32]) -> Self {
-        // Use the minimum of frames and durations to stay in bounds
-        let count = frames.len().min(tick_durations.len());
+    /// Create a new Animation from a frame count and per-frame tick durations.
+    ///
+    /// `frame_count` must match the number of images stored in the
+    /// corresponding `CreatureSlot::cached_*` vector.
+    /// `tick_durations` are in game ticks (1 tick ≈ 50 ms).
+    pub fn new(frame_count: usize, tick_durations: &[u32]) -> Self {
+        let count = frame_count.min(tick_durations.len());
         let durations_ms: Vec<u64> = tick_durations[..count]
             .iter()
             .map(|&t| t as u64 * 50)
@@ -41,7 +50,6 @@ impl Animation {
         let total_ms: u64 = durations_ms.iter().sum();
 
         Self {
-            frames: frames[..count].to_vec(),
             durations_ms,
             total_ms,
         }
@@ -49,7 +57,7 @@ impl Animation {
 
     /// Get the frame index for a given elapsed time (in ms), looping infinitely.
     pub fn frame_index_at(&self, elapsed_ms: u64) -> usize {
-        if self.total_ms == 0 || self.frames.is_empty() {
+        if self.total_ms == 0 || self.durations_ms.is_empty() {
             return 0;
         }
 
@@ -63,23 +71,27 @@ impl Animation {
             }
         }
 
-        self.frames.len() - 1
+        self.durations_ms.len() - 1
     }
 }
 
-/// The main animator that manages animation state and frame selection.
+/// The main animator: manages animation state and frame-index selection.
+///
+/// The animator does **not** own any pixel data — it is purely a timing
+/// engine. The caller is responsible for mapping the returned frame index
+/// to the correct image in a `CreatureSlot::cached_*` vector.
 pub struct Animator {
     state: AnimationState,
     /// When the current state started (for elapsed time calculation).
     state_start: Instant,
-    /// Loaded animations for each state.
+    /// Timing animations for each state (no frames stored here).
     idle_anim: Option<Animation>,
     eat_anim: Option<Animation>,
     sleep_anim: Option<Animation>,
 }
 
 impl Animator {
-    /// Create a new Animator. Call `load_animations` to set up the sprite data.
+    /// Create a new Animator. Call `load_animations` to set up timing data.
     pub fn new() -> Self {
         Self {
             state: AnimationState::Idle,
@@ -90,7 +102,10 @@ impl Animator {
         }
     }
 
-    /// Load animations for all three states.
+    /// Load timing animations for all three states.
+    ///
+    /// The `Animation` values here are timing-only; the corresponding
+    /// pixel frames must be stored in `CreatureSlot::cached_*`.
     pub fn load_animations(
         &mut self,
         idle: Animation,
@@ -125,7 +140,8 @@ impl Animator {
 
     /// Get the current frame index based on elapsed time.
     ///
-    /// Returns `None` if no animations have been loaded yet.
+    /// Returns `None` if no timing data has been loaded yet.
+    /// The returned index is safe to use directly into `CreatureSlot::cached_*`.
     pub fn current_frame_index(&self) -> Option<usize> {
         let elapsed_ms = self.state_start.elapsed().as_millis() as u64;
         match self.state {
@@ -143,32 +159,15 @@ impl Animator {
             }
         }
     }
-
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{Rgba, RgbaImage};
-
-    /// Make a simple 4x4 colored frame for testing.
-    fn make_frame(r: u8, g: u8, b: u8) -> DynamicImage {
-        let mut img = RgbaImage::new(4, 4);
-        for y in 0..4 {
-            for x in 0..4 {
-                img.put_pixel(x, y, Rgba([r, g, b, 255]));
-            }
-        }
-        DynamicImage::ImageRgba8(img)
-    }
 
     fn make_test_animation() -> Animation {
-        let frames = vec![
-            make_frame(255, 0, 0),
-            make_frame(0, 255, 0),
-            make_frame(0, 0, 255),
-        ];
-        Animation::new(frames, &[2, 2, 2]) // 100ms each, 300ms total
+        // 3 frames, 100 ms each (tick=2 → 2×50=100 ms), 300 ms total.
+        Animation::new(3, &[2, 2, 2])
     }
 
     #[test]
@@ -191,14 +190,14 @@ mod tests {
     #[test]
     fn test_animation_frame_count() {
         let anim = make_test_animation();
-        assert_eq!(anim.frames.len(), 3);
-        assert_eq!(anim.total_ms, 300); // 3 frames × 100ms
+        assert_eq!(anim.durations_ms.len(), 3);
+        assert_eq!(anim.total_ms, 300); // 3 frames × 100 ms
     }
 
     #[test]
     fn test_animation_looping_frame_index() {
         let anim = make_test_animation();
-        // 100ms per frame, 300ms total
+        // 100 ms per frame, 300 ms total
         assert_eq!(anim.frame_index_at(0), 0);    // start of frame 0
         assert_eq!(anim.frame_index_at(50), 0);   // middle of frame 0
         assert_eq!(anim.frame_index_at(100), 1);  // start of frame 1

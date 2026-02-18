@@ -2,19 +2,22 @@
 
 **A terminal-based virtual pet — Tamagotchi in your terminal!**
 
+> **v0.0.3** — Shared pen view + memory optimisation (see [Changelog](#changelog))
+
 > 📸 *Screenshot coming soon*
 
 ## Features
 
 - 🐾 Animated pixel-art creatures rendered directly in your terminal
 - 🎨 Sprite animations from the PMDCollab SpriteCollab repository
+- 🌿 Shared-pen view — all creatures share one open canvas, no dividing walls
 - 🔄 Multiple creatures displayed simultaneously (up to 6)
 - 🍖 Feed, sleep, and interact with your creatures
 - ➕ Add, remove, and swap creatures at runtime — no config editing required
 - ⚙️ TOML-based configuration for customizing your starting roster
 - 🖼️ Sixel/Kitty/iTerm2 image protocol support via ratatui-image
-- ⚡ Performance-optimised: sprites are pre-scaled at load time and only
-  redrawn when the displayed frame actually changes
+- ⚡ Performance-optimised: sprites pre-scaled at load time, only redrawn when
+  the displayed frame changes; frames stored once, not twice
 
 ## Creature Roster
 
@@ -98,8 +101,10 @@ PoCLImon uses a TOML config file. Default location: `~/.poclimon/config.toml`
 # PoCLImon Configuration
 
 [display]
-# Scale multiplier for sprites (default 6)
-scale = 6
+# Scale multiplier for sprites.
+# Default: 3 (since v0.0.3; was 6 in v0.0.2).
+# Lower values use less memory: scale=3 uses ~4× less RAM than scale=6.
+scale = 3
 
 [roster]
 # Starting creatures (max 6 at startup; use A/R/Tab to change at runtime)
@@ -114,6 +119,25 @@ The `roster.creatures` array sets the starting roster. You can then use
 
 - Sprites from [PMDCollab SpriteCollab](https://sprites.pmdcollab.org/) — community-contributed Pokémon Mystery Dungeon sprite sheets
 - Licensed under **CC BY-NC** (Creative Commons Attribution-NonCommercial)
+
+## Changelog
+
+### v0.0.3
+- **Shared pen view** — replaced the bordered-box grid with a single open
+  canvas. All creatures share one area; the selected creature is highlighted
+  with a `▲` name label in yellow. No internal dividers.
+- **Memory optimisation** — scale default changed from 6 → 3 (4× less RAM
+  per frame). Frame cache capped at 8 frames per animation. `Animation` is
+  now timing-only; pixel data lives exclusively in the slot cache (no more
+  double-storage).
+- **New unit tests** — pen layout (`compute_creature_region`) and frame
+  capping (`cap_frames`) fully tested.
+
+### v0.0.2
+- Multi-creature grid layout (1–6 slots, bordered boxes)
+- Sprite download + caching from PMDCollab SpriteCollab
+
+---
 
 ## License
 

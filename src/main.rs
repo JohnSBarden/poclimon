@@ -41,20 +41,39 @@ struct Cli {
     creature: Option<String>,
 }
 
-/// A single creature slot in the multi-sprite display.
+// ── Memory budget ──────────────────────────────────────────────────────────────
+//
+// v0.0.2 stored frames TWICE: once in `Animator.{idle,eat,sleep}_anim.frames`
+// and once in `CreatureSlot.cached_*`.  At scale=6 each frame was 240×336×4 ≈
+// 323 KB, so 3 anims × ~6 frames × 2 copies ≈ 11.6 MB per creature × 5 = 58 MB.
+//
+// v0.0.3 fixes:
+//   1. Scale default 6 → 3:  frames shrink by 6²/3² = 4×.
+//   2. Frame cap at 8 per animation: limits long PMDCollab animations.
+//   3. `Animation` is now timing-only — no pixel data. Frames live exclusively
+//      in `CreatureSlot::cached_*`.  Double-storage eliminated.
+//
+// Expected working set at scale=3, ≤8 frames, 5 creatures:
+//   120×168×4 ≈ 80 KB/frame × 8 frames × 3 anims × 5 creatures ≈ 9.6 MB peak.
+
+/// Maximum frames to cache per animation.  If the sprite sheet has more,
+/// we sample evenly-spaced frames so the animation still looks smooth.
+const MAX_CACHED_FRAMES: usize = 8;
+
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// A single creature slot in the shared-pen display.
 ///
-/// Holds pre-scaled, normalized frames for each animation state so the
-/// render loop never needs to resize images — only when the displayed frame
-/// index changes do we recreate the `StatefulProtocol`.
+/// Pixel data lives here; the animator only knows timing/state.
 struct CreatureSlot {
     creature_id: u32,
     creature_name: String,
     animator: Animator,
-    /// Pre-scaled and normalized frames for the Idle animation.
+    /// Pre-scaled, normalized frames for the Idle animation.
     cached_idle: Vec<image::DynamicImage>,
-    /// Pre-scaled and normalized frames for the Eat animation.
+    /// Pre-scaled, normalized frames for the Eat animation.
     cached_eat: Vec<image::DynamicImage>,
-    /// Pre-scaled and normalized frames for the Sleep animation.
+    /// Pre-scaled, normalized frames for the Sleep animation.
     cached_sleep: Vec<image::DynamicImage>,
     /// The (state, frame_index) of the last rendered frame.
     /// We only rebuild `current_frame` when this changes.
@@ -181,7 +200,7 @@ impl App {
     /// present.  Does nothing when all creatures are already in the roster
     /// or the roster is already at the display limit (6 slots).
     fn add_creature(&mut self, picker: &mut Picker) {
-        // Cap at 6 for the grid renderer.
+        // Cap at 6 for the pen renderer.
         if self.slots.len() >= 6 {
             return;
         }
@@ -279,10 +298,41 @@ impl App {
     }
 }
 
+// ── Sprite loading ─────────────────────────────────────────────────────────────
+
+/// Cap a frame list to at most `MAX_CACHED_FRAMES`, selecting evenly-spaced
+/// frames so the animation remains representative.
+///
+/// Also truncates `durations` to match `frames` in case they differ (defensive).
+fn cap_frames(
+    frames: Vec<image::DynamicImage>,
+    durations: Vec<u32>,
+) -> (Vec<image::DynamicImage>, Vec<u32>) {
+    // Align lengths defensively.
+    let n = frames.len().min(durations.len());
+    let mut frames = frames;
+    let mut durations = durations;
+    frames.truncate(n);
+    durations.truncate(n);
+
+    if n <= MAX_CACHED_FRAMES {
+        return (frames, durations);
+    }
+
+    // Pick MAX_CACHED_FRAMES evenly-spaced indices.
+    let cap = MAX_CACHED_FRAMES;
+    let indices: Vec<usize> = (0..cap).map(|i| i * n / cap).collect();
+    let capped_frames: Vec<image::DynamicImage> =
+        indices.iter().map(|&i| frames[i].clone()).collect();
+    let capped_durations: Vec<u32> = indices.iter().map(|&i| durations[i]).collect();
+    (capped_frames, capped_durations)
+}
+
 /// Download, parse, and cache all animation frames for a single slot.
 ///
 /// Frames are pre-scaled by `scale` and normalized to the Idle animation's
 /// canonical dimensions so the render loop never has to resize.
+/// Frames live only in `slot.cached_*`; the `Animator` holds timing only.
 fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<()> {
     let (anim_data_path, sheets) = sprite::download_all_sprites(slot.creature_id)?;
 
@@ -290,22 +340,23 @@ fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<()> {
     let anim_infos = anim_data::parse_anim_data(&xml);
 
     // Load Idle first to establish the canonical frame size.
-    let (idle_anim, idle_w, idle_h) =
+    let (idle_frames, idle_timing, idle_w, idle_h) =
         load_and_scale_animation("Idle", &sheets, &anim_infos, scale, None)?;
 
-    let (eat_anim, _, _) =
+    let (eat_frames, eat_timing, _, _) =
         load_and_scale_animation("Eat", &sheets, &anim_infos, scale, Some((idle_w, idle_h)))?;
 
-    let (sleep_anim, _, _) =
+    let (sleep_frames, sleep_timing, _, _) =
         load_and_scale_animation("Sleep", &sheets, &anim_infos, scale, Some((idle_w, idle_h)))?;
 
-    // Cache the scaled frames so the render loop never resizes.
-    slot.cached_idle = idle_anim.frames.clone();
-    slot.cached_eat = eat_anim.frames.clone();
-    slot.cached_sleep = sleep_anim.frames.clone();
+    // Store frames exclusively in the slot cache.
+    slot.cached_idle = idle_frames;
+    slot.cached_eat = eat_frames;
+    slot.cached_sleep = sleep_frames;
 
+    // Give the animator timing-only Animation objects (no pixel data).
     slot.animator = Animator::new();
-    slot.animator.load_animations(idle_anim, eat_anim, sleep_anim);
+    slot.animator.load_animations(idle_timing, eat_timing, sleep_timing);
 
     // Invalidate any stale render key so the first frame is always drawn.
     slot.last_render_key = None;
@@ -314,17 +365,18 @@ fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<()> {
     Ok(())
 }
 
-/// Load an animation, pre-scale its frames by `scale`, then normalize them to
-/// `canonical_size` (if provided) using nearest-neighbor scaling.
+/// Load an animation, pre-scale its frames by `scale`, cap to
+/// `MAX_CACHED_FRAMES`, then normalize to `canonical_size` (if provided).
 ///
-/// Returns `(animation, frame_width_after_scale, frame_height_after_scale)`.
+/// Returns `(frames, timing_animation, frame_width, frame_height)`.
+/// The returned `Animation` is timing-only — no pixel data.
 fn load_and_scale_animation(
     anim_name: &str,
     sheets: &[(String, PathBuf)],
     anim_infos: &HashMap<String, AnimInfo>,
     scale: u32,
     canonical_size: Option<(u32, u32)>,
-) -> Result<(Animation, u32, u32)> {
+) -> Result<(Vec<image::DynamicImage>, Animation, u32, u32)> {
     let sheet_path = sheets
         .iter()
         .find(|(name, _)| name == anim_name)
@@ -332,7 +384,7 @@ fn load_and_scale_animation(
 
     let anim_info = anim_infos.get(anim_name);
 
-    let (raw_frames, durations) = match (sheet_path, anim_info) {
+    let (raw_frames, raw_durations) = match (sheet_path, anim_info) {
         (Some(path), Some(info)) => {
             let sheet = image::ImageReader::open(path)?.decode()?;
             let frames = sprite_sheet::extract_frames(&sheet, info);
@@ -350,7 +402,7 @@ fn load_and_scale_animation(
         }
     };
 
-    // Step 1: scale by the display scale factor.
+    // Step 1: scale by the display scale factor (Nearest-neighbor, RGBA8).
     let scaled: Vec<image::DynamicImage> = raw_frames
         .into_iter()
         .map(|f| {
@@ -364,21 +416,29 @@ fn load_and_scale_animation(
         })
         .collect();
 
-    // Record dimensions after scaling (before optional normalization).
-    let scaled_w = scaled.first().map(|f| f.width()).unwrap_or(0);
-    let scaled_h = scaled.first().map(|f| f.height()).unwrap_or(0);
+    // Step 2: cap to MAX_CACHED_FRAMES (evenly-spaced sampling if needed).
+    let (capped_frames, capped_durations) = cap_frames(scaled, raw_durations);
 
-    // Step 2: normalize to the canonical size if provided.
+    // Record dimensions after scaling (before optional normalization).
+    let scaled_w = capped_frames.first().map(|f| f.width()).unwrap_or(0);
+    let scaled_h = capped_frames.first().map(|f| f.height()).unwrap_or(0);
+
+    // Step 3: normalize to the canonical size if provided.
     let final_frames = match canonical_size {
-        Some((cw, ch)) => sprite_sheet::normalize_frames(scaled, cw, ch),
-        None => scaled,
+        Some((cw, ch)) => sprite_sheet::normalize_frames(capped_frames, cw, ch),
+        None => capped_frames,
     };
 
     let out_w = final_frames.first().map(|f| f.width()).unwrap_or(scaled_w);
     let out_h = final_frames.first().map(|f| f.height()).unwrap_or(scaled_h);
 
-    Ok((Animation::new(final_frames, &durations), out_w, out_h))
+    // Build a timing-only Animation aligned to the final frame count.
+    let timing = Animation::new(final_frames.len(), &capped_durations);
+
+    Ok((final_frames, timing, out_w, out_h))
 }
+
+// ── Application entry point ────────────────────────────────────────────────────
 
 fn main() -> Result<()> {
     let args = Cli::parse();
@@ -480,22 +540,24 @@ fn run_app(
     Ok(())
 }
 
+// ── UI layout ──────────────────────────────────────────────────────────────────
+
 fn ui(f: &mut Frame<'_>, app: &mut App) {
     let chunks = Layout::vertical([
         Constraint::Length(3), // Title bar
-        Constraint::Min(10),  // Creature area
+        Constraint::Min(10),   // Pen (shared creature canvas)
         Constraint::Length(3), // Status bar
         Constraint::Length(3), // Help bar
     ])
     .split(f.area());
 
-    // Title — collect the name up front so we don't hold a borrow into `app`
-    // across the mutable `render_creature_grid` call below.
+    // Collect data before mutable borrows.
     let selected_name: String = app
         .slots
         .get(app.selected)
         .map(|s| s.creature_name.clone())
         .unwrap_or_else(|| "???".to_string());
+
     let title = Paragraph::new(Line::from(vec![
         Span::styled("PoCLImon", Style::default().fg(Color::Yellow)),
         Span::raw(" — "),
@@ -511,11 +573,11 @@ fn ui(f: &mut Frame<'_>, app: &mut App) {
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title("⚡ PoCLImon v0.0.2"),
+            .title("⚡ PoCLImon v0.0.3"),
     );
     f.render_widget(title, chunks[0]);
 
-    // Gather status info before mutable borrow
+    // Gather status info before mutable borrow.
     let state_label = app
         .slots
         .get(app.selected)
@@ -535,8 +597,9 @@ fn ui(f: &mut Frame<'_>, app: &mut App) {
         })
         .unwrap_or(Color::White);
 
-    // Creature area — layout depends on count
-    render_creature_grid(f, chunks[1], app);
+    // Shared pen — all creatures on one open canvas.
+    render_pen(f, chunks[1], app);
+
     let status = Paragraph::new(Line::from(vec![
         Span::raw(format!("{}: ", selected_name)),
         Span::styled(state_label, Style::default().fg(status_color)),
@@ -553,124 +616,105 @@ fn ui(f: &mut Frame<'_>, app: &mut App) {
     f.render_widget(help, chunks[3]);
 }
 
-/// Render the creature grid based on how many creatures are active.
-fn render_creature_grid(f: &mut Frame<'_>, area: Rect, app: &mut App) {
+// ── Shared pen rendering ───────────────────────────────────────────────────────
+
+/// Render all creatures in a single shared pen with no internal borders.
+///
+/// A single outer border wraps the pen area.  Creatures are spaced evenly
+/// along the horizontal axis; a name label below each sprite acts as the
+/// selection indicator (Yellow + ▲ for selected, DarkGray for others).
+fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App) {
     let count = app.slots.len();
     if count == 0 {
         return;
     }
 
-    match count {
-        1 => {
-            render_creature_slot(f, area, &mut app.slots[0], app.selected == 0);
-        }
-        2 => {
-            let cols = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(area);
-            for (i, col) in cols.iter().enumerate() {
-                if let Some(slot) = app.slots.get_mut(i) {
-                    render_creature_slot(f, *col, slot, app.selected == i);
-                }
-            }
-        }
-        3 => {
-            let cols = Layout::horizontal([
-                Constraint::Percentage(33),
-                Constraint::Percentage(34),
-                Constraint::Percentage(33),
-            ])
-            .split(area);
-            for (i, col) in cols.iter().enumerate() {
-                if let Some(slot) = app.slots.get_mut(i) {
-                    render_creature_slot(f, *col, slot, app.selected == i);
-                }
-            }
-        }
-        4..=6 => {
-            // 2 rows: top row gets ceil(count/2), bottom gets the rest
-            let top_count = count.div_ceil(2);
-            let bot_count = count - top_count;
-            let rows = Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(area);
-
-            // Top row
-            let top_constraints: Vec<Constraint> = (0..top_count)
-                .map(|_| Constraint::Ratio(1, top_count as u32))
-                .collect();
-            let top_cols = Layout::horizontal(top_constraints).split(rows[0]);
-            for (i, col) in top_cols.iter().enumerate() {
-                if let Some(slot) = app.slots.get_mut(i) {
-                    render_creature_slot(f, *col, slot, app.selected == i);
-                }
-            }
-
-            // Bottom row
-            if bot_count > 0 {
-                let bot_constraints: Vec<Constraint> = (0..bot_count)
-                    .map(|_| Constraint::Ratio(1, bot_count as u32))
-                    .collect();
-                let bot_cols = Layout::horizontal(bot_constraints).split(rows[1]);
-                for (i, col) in bot_cols.iter().enumerate() {
-                    let idx = top_count + i;
-                    if let Some(slot) = app.slots.get_mut(idx) {
-                        render_creature_slot(f, *col, slot, app.selected == idx);
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Render a single creature slot.
-fn render_creature_slot(
-    f: &mut Frame<'_>,
-    area: Rect,
-    slot: &mut CreatureSlot,
-    selected: bool,
-) {
-    let border_color = if selected {
-        Color::Yellow
-    } else {
-        Color::DarkGray
-    };
-
-    let state_icon = match slot.animator.state() {
-        AnimationState::Idle => "",
-        AnimationState::Eating => " 🍖",
-        AnimationState::Sleeping => " 💤",
-    };
-
+    // Single outer border — no inner dividers.
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color))
-        .title(format!("{}{}", slot.creature_name, state_icon));
-
+        .title("🌿 Pen");
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    if let Some(ref mut protocol) = slot.current_frame {
-        let img_area = centered_rect(
-            inner,
-            inner.width.saturating_sub(2),
-            inner.height.saturating_sub(1),
+    let selected = app.selected;
+
+    for i in 0..count {
+        let creature_region = compute_creature_region(inner, i, count);
+
+        // Reserve the last row for the name label.
+        let img_h = creature_region.height.saturating_sub(1);
+        let img_area = Rect::new(
+            creature_region.x,
+            creature_region.y,
+            creature_region.width,
+            img_h,
         );
-        let image_widget = StatefulImage::default();
-        f.render_stateful_widget(image_widget, img_area, protocol);
-    } else {
-        let fallback = Paragraph::new("Loading...")
-            .style(Style::default().fg(Color::DarkGray));
-        f.render_widget(fallback, inner);
+
+        let label_y = creature_region.y + img_h;
+        let label_in_bounds = label_y < inner.y + inner.height;
+
+        let slot = &mut app.slots[i];
+
+        // Render sprite (or "Loading…" fallback).
+        if let Some(ref mut protocol) = slot.current_frame {
+            let image_widget = StatefulImage::default();
+            f.render_stateful_widget(image_widget, img_area, protocol);
+        } else {
+            let fallback = Paragraph::new("Loading…")
+                .style(Style::default().fg(Color::DarkGray));
+            f.render_widget(fallback, img_area);
+        }
+
+        // Name label — selection indicator without borders.
+        if label_in_bounds {
+            let state_icon = match slot.animator.state() {
+                AnimationState::Idle => "",
+                AnimationState::Eating => " 🍖",
+                AnimationState::Sleeping => " 💤",
+            };
+            let is_selected = selected == i;
+            let (name_color, prefix) = if is_selected {
+                (Color::Yellow, "▲ ")
+            } else {
+                (Color::DarkGray, "  ")
+            };
+            let label = format!("{}{}{}", prefix, slot.creature_name, state_icon);
+            let label_rect = Rect::new(creature_region.x, label_y, creature_region.width, 1);
+            f.render_widget(
+                Paragraph::new(label).style(Style::default().fg(name_color)),
+                label_rect,
+            );
+        }
     }
 }
 
-fn centered_rect(area: Rect, max_width: u16, max_height: u16) -> Rect {
-    let width = max_width.min(area.width);
-    let height = max_height.min(area.height);
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    Rect::new(x, y, width, height)
+/// Compute the `Rect` for creature `index` of `total` within `pen_inner`.
+///
+/// Divides the pen width into `total` equal regions; the last region absorbs
+/// any remainder pixels from integer division.
+pub(crate) fn compute_creature_region(pen_inner: Rect, index: usize, total: usize) -> Rect {
+    if total == 0 {
+        return pen_inner;
+    }
+    // Guard: if there are more creatures than pixels, each gets the full area.
+    if total > pen_inner.width as usize {
+        return pen_inner;
+    }
+
+    let region_w = pen_inner.width / total as u16;
+    let x = pen_inner.x + index as u16 * region_w;
+
+    // Last creature absorbs remaining width after integer division.
+    let w = if index + 1 == total {
+        pen_inner.width.saturating_sub(index as u16 * region_w)
+    } else {
+        region_w
+    };
+
+    Rect::new(x, pen_inner.y, w, pen_inner.height)
 }
+
+// ── Tests ──────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -691,7 +735,7 @@ mod tests {
         App::new(config)
     }
 
-    // ── select_next / select_prev ──────────────────────────────────────────
+    // ── select_next / select_prev ─────────────────────────────────────────
 
     #[test]
     fn test_select_next_wraps() {
@@ -785,5 +829,143 @@ mod tests {
         let mut app = make_app(&[(1, "Bulbasaur")]);
         app.select_slot(5);
         assert_eq!(app.selected, 0); // unchanged
+    }
+
+    // ── compute_creature_region (pen layout) ──────────────────────────────
+
+    #[test]
+    fn test_pen_region_single_creature() {
+        let area = Rect::new(0, 0, 100, 50);
+        let r = compute_creature_region(area, 0, 1);
+        assert_eq!(r.x, 0);
+        assert_eq!(r.y, 0);
+        assert_eq!(r.width, 100);
+        assert_eq!(r.height, 50);
+    }
+
+    #[test]
+    fn test_pen_region_two_creatures_even_split() {
+        let area = Rect::new(0, 0, 100, 50);
+        let r0 = compute_creature_region(area, 0, 2);
+        let r1 = compute_creature_region(area, 1, 2);
+        assert_eq!(r0.x, 0);
+        assert_eq!(r0.width, 50);
+        assert_eq!(r1.x, 50);
+        assert_eq!(r1.width, 50); // 100 − 1×50 = 50
+        assert_eq!(r0.height, 50);
+        assert_eq!(r1.height, 50);
+    }
+
+    #[test]
+    fn test_pen_region_three_creatures_remainder_in_last() {
+        // 100 / 3 = 33 remainder 1 → last slot gets 34.
+        let area = Rect::new(0, 0, 100, 50);
+        let r0 = compute_creature_region(area, 0, 3);
+        let r1 = compute_creature_region(area, 1, 3);
+        let r2 = compute_creature_region(area, 2, 3);
+        assert_eq!(r0.x, 0);
+        assert_eq!(r0.width, 33);
+        assert_eq!(r1.x, 33);
+        assert_eq!(r1.width, 33);
+        assert_eq!(r2.x, 66);
+        assert_eq!(r2.width, 34); // 100 − 2×33 = 34
+    }
+
+    #[test]
+    fn test_pen_region_six_creatures() {
+        // 120 / 6 = 20 exactly — no remainder.
+        let area = Rect::new(2, 4, 120, 40);
+        for i in 0..6usize {
+            let r = compute_creature_region(area, i, 6);
+            assert_eq!(r.x, 2 + i as u16 * 20);
+            assert_eq!(r.width, 20);
+            assert_eq!(r.y, 4);
+            assert_eq!(r.height, 40);
+        }
+    }
+
+    #[test]
+    fn test_pen_region_non_zero_origin() {
+        let area = Rect::new(10, 5, 60, 30);
+        let r0 = compute_creature_region(area, 0, 2);
+        let r1 = compute_creature_region(area, 1, 2);
+        assert_eq!(r0.x, 10);
+        assert_eq!(r1.x, 40); // 10 + 30
+        assert_eq!(r0.y, 5);
+        assert_eq!(r1.y, 5);
+        assert_eq!(r0.height, 30);
+    }
+
+    #[test]
+    fn test_pen_region_total_zero_returns_full_area() {
+        let area = Rect::new(0, 0, 80, 24);
+        let r = compute_creature_region(area, 0, 0);
+        assert_eq!(r, area);
+    }
+
+    // ── cap_frames ────────────────────────────────────────────────────────
+
+    fn blank_frames(n: usize) -> Vec<image::DynamicImage> {
+        (0..n)
+            .map(|_| {
+                image::DynamicImage::ImageRgba8(image::RgbaImage::new(4, 4))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_cap_frames_under_limit_passthrough() {
+        let frames = blank_frames(5);
+        let durations = vec![10u32; 5];
+        let (cf, cd) = cap_frames(frames, durations);
+        assert_eq!(cf.len(), 5);
+        assert_eq!(cd.len(), 5);
+    }
+
+    #[test]
+    fn test_cap_frames_at_limit_passthrough() {
+        let frames = blank_frames(MAX_CACHED_FRAMES);
+        let durations = vec![10u32; MAX_CACHED_FRAMES];
+        let (cf, cd) = cap_frames(frames, durations);
+        assert_eq!(cf.len(), MAX_CACHED_FRAMES);
+        assert_eq!(cd.len(), MAX_CACHED_FRAMES);
+    }
+
+    #[test]
+    fn test_cap_frames_over_limit_capped() {
+        let n = 20;
+        let frames = blank_frames(n);
+        let durations = vec![10u32; n];
+        let (cf, cd) = cap_frames(frames, durations);
+        assert_eq!(cf.len(), MAX_CACHED_FRAMES);
+        assert_eq!(cd.len(), MAX_CACHED_FRAMES);
+    }
+
+    #[test]
+    fn test_cap_frames_evenly_spaced_indices() {
+        // Use distinct duration values (0, 1, 2, …) to identify which frames
+        // were selected; this makes the sampling assertion concrete.
+        let n = 16usize;
+        let frames = blank_frames(n);
+        let durations: Vec<u32> = (0..n as u32).collect(); // 0, 1, …, 15
+        let (cf, cd) = cap_frames(frames, durations);
+
+        assert_eq!(cf.len(), MAX_CACHED_FRAMES); // cap = 8
+        // With n=16, cap=8: index i → i * 16 / 8 = 0, 2, 4, 6, 8, 10, 12, 14
+        let expected: Vec<u32> = (0..MAX_CACHED_FRAMES as u32)
+            .map(|i| i * n as u32 / MAX_CACHED_FRAMES as u32)
+            .collect();
+        assert_eq!(cd, expected);
+    }
+
+    #[test]
+    fn test_cap_frames_mismatched_lengths_aligned() {
+        // durations has more entries than frames — cap_frames should align.
+        let frames = blank_frames(3);
+        let durations = vec![10u32, 20, 30, 40, 50]; // 5 durations, 3 frames
+        let (cf, cd) = cap_frames(frames, durations);
+        assert_eq!(cf.len(), 3);
+        assert_eq!(cd.len(), 3);
+        assert_eq!(cd, vec![10, 20, 30]);
     }
 }

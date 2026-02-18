@@ -38,7 +38,7 @@ impl Default for DisplayConfig {
 }
 
 fn default_scale() -> u32 {
-    6
+    3
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -76,7 +76,7 @@ pub struct GameConfig {
 impl Default for GameConfig {
     fn default() -> Self {
         Self {
-            scale: 6,
+            scale: 3,
             roster: vec![
                 (1, "Bulbasaur".to_string()),
                 (4, "Charmander".to_string()),
@@ -121,7 +121,7 @@ impl GameConfig {
             ConfigError::Validation(format!("Unknown creature: '{}'", name))
         })?;
         Ok(Self {
-            scale: 6,
+            scale: 3,
             roster: vec![(creature.id, creature.name.to_string())],
         })
     }
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = GameConfig::default();
-        assert_eq!(config.scale, 6);
+        assert_eq!(config.scale, 3);
         assert_eq!(config.roster.len(), 5);
         assert_eq!(config.roster[0], (1, "Bulbasaur".to_string()));
         assert_eq!(config.roster[3], (25, "Pikachu".to_string()));
@@ -265,7 +265,7 @@ creatures = ["mewtwo"]
     fn test_default_toml_config() {
         let toml_config = TomlConfig::default();
         let config = GameConfig::from_toml(toml_config).unwrap();
-        assert_eq!(config.scale, 6);
+        assert_eq!(config.scale, 3);
         assert_eq!(config.roster.len(), 5);
         assert_eq!(config.roster[0].1, "Bulbasaur");
         assert_eq!(config.roster[3].1, "Pikachu");
