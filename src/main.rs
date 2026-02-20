@@ -107,17 +107,19 @@ struct CreatureSlot {
     creature_id: u32,
     creature_name: String,
     animator: Animator,
-    /// Pre-scaled, normalized frames for the Idle animation.
-    cached_idle: Vec<image::DynamicImage>,
-    /// Pre-scaled, normalized frames for the Eat animation.
-    cached_eat: Vec<image::DynamicImage>,
-    /// Pre-scaled, normalized frames for the Sleep animation.
-    cached_sleep: Vec<image::DynamicImage>,
-    /// Pre-encoded Protocol objects, indexed by [state_index][frame_index].
+    /// Pre-scaled, normalized frames for the Idle animation, indexed by direction.
+    /// [dir_idx][frame_idx] where dir: 0=Down, 1=Left, 2=Up, 3=Right
+    cached_idle: [Vec<image::DynamicImage>; 4],
+    /// Pre-scaled, normalized frames for the Eat animation, indexed by direction.
+    cached_eat: [Vec<image::DynamicImage>; 4],
+    /// Pre-scaled, normalized frames for the Sleep animation, indexed by direction.
+    cached_sleep: [Vec<image::DynamicImage>; 4],
+    /// Pre-encoded Protocol objects, indexed by [state_index][dir_index][frame_index].
     /// state 0 = Idle, 1 = Eat, 2 = Sleep.
+    /// dir: 0=Down, 1=Left, 2=Up, 3=Right.
     /// `None` entries mean encoding failed for that frame (fallback shown).
     /// Rebuilt whenever `encoded_rect` changes (terminal resize or first render).
-    encoded_frames: [Vec<Option<Protocol>>; 3],
+    encoded_frames: [[Vec<Option<Protocol>>; 4]; 3],
     /// The size `Rect` (position 0,0) these protocols were encoded for.
     /// `None` means not yet encoded. Position-independent — re-encode only on resize.
     encoded_rect: Option<Rect>,
@@ -129,6 +131,8 @@ struct CreatureSlot {
     pub vel_x: f32,
     /// Vertical velocity in cells per 50ms tick.
     pub vel_y: f32,
+    /// Current direction index: 0=Down, 1=Left, 2=Up, 3=Right.
+    pub current_dir: usize,
 }
 
 impl CreatureSlot {
@@ -137,15 +141,16 @@ impl CreatureSlot {
             creature_id,
             creature_name,
             animator: Animator::new(),
-            cached_idle: Vec::new(),
-            cached_eat: Vec::new(),
-            cached_sleep: Vec::new(),
-            encoded_frames: [Vec::new(), Vec::new(), Vec::new()],
+            cached_idle: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            cached_eat: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            cached_sleep: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            encoded_frames: std::array::from_fn(|_| std::array::from_fn(|_| Vec::new())),
             encoded_rect: None,
             pos_x: 0.0,
             pos_y: 0.0,
             vel_x: 0.0,
             vel_y: 0.0,
+            current_dir: 0,
         }
     }
 
@@ -459,32 +464,63 @@ fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<String>>
     let xml = std::fs::read_to_string(&anim_data_path)?;
     let anim_infos = anim_data::parse_anim_data(&xml);
 
-    // Load Idle first to establish the canonical frame size.
-    let (idle_frames, idle_timing, idle_w, idle_h, _) =
-        load_and_scale_animation("Idle", &sheets, &anim_infos, scale, None)?;
+    // PMDCollab direction row indices: 0=Down, 2=Left, 4=Up, 6=Right
+    // Our dir_idx mapping:             0=Down, 1=Left, 2=Up, 3=Right
+    const DIR_ROWS: [u32; 4] = [0, 2, 4, 6];
 
-    // Try Eat — if fallback (no sprite in PMDCollab), reuse Idle silently.
-    let (eat_frames_raw, eat_timing_raw, _, _, eat_fallback) =
-        load_and_scale_animation("Eat", &sheets, &anim_infos, scale, Some((idle_w, idle_h)))?;
-    let (eat_frames, eat_timing) = if eat_fallback {
-        (idle_frames.clone(), idle_timing.clone())
+    // Load Idle for all 4 directions — use dir 0 (Down) to establish canonical size.
+    let (idle_down, idle_timing, idle_w, idle_h, _) =
+        load_and_scale_animation("Idle", &sheets, &anim_infos, scale, None, DIR_ROWS[0])?;
+    let idle_left = load_and_scale_animation("Idle", &sheets, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[1])
+        .map(|r| r.0)
+        .unwrap_or_else(|_| idle_down.clone());
+    let idle_up = load_and_scale_animation("Idle", &sheets, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[2])
+        .map(|r| r.0)
+        .unwrap_or_else(|_| idle_down.clone());
+    let idle_right = load_and_scale_animation("Idle", &sheets, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[3])
+        .map(|r| r.0)
+        .unwrap_or_else(|_| idle_down.clone());
+    slot.cached_idle = [idle_down.clone(), idle_left, idle_up, idle_right];
+
+    // Try Eat dir 0 first to get fallback status.
+    let (eat_down_raw, eat_timing_raw, _, _, eat_fallback) =
+        load_and_scale_animation("Eat", &sheets, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[0])?;
+    let (eat_frames_by_dir, eat_timing) = if eat_fallback {
+        // Reuse Idle frames for all 4 directions
+        (slot.cached_idle.clone(), idle_timing.clone())
     } else {
-        (eat_frames_raw, eat_timing_raw)
+        let eat_left = load_and_scale_animation("Eat", &sheets, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[1])
+            .map(|r| r.0)
+            .unwrap_or_else(|_| eat_down_raw.clone());
+        let eat_up = load_and_scale_animation("Eat", &sheets, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[2])
+            .map(|r| r.0)
+            .unwrap_or_else(|_| eat_down_raw.clone());
+        let eat_right = load_and_scale_animation("Eat", &sheets, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[3])
+            .map(|r| r.0)
+            .unwrap_or_else(|_| eat_down_raw.clone());
+        ([eat_down_raw, eat_left, eat_up, eat_right], eat_timing_raw)
     };
+    slot.cached_eat = eat_frames_by_dir;
 
-    // Try Sleep — if fallback (no sprite in PMDCollab), reuse Idle silently.
-    let (sleep_frames_raw, sleep_timing_raw, _, _, sleep_fallback) =
-        load_and_scale_animation("Sleep", &sheets, &anim_infos, scale, Some((idle_w, idle_h)))?;
-    let (sleep_frames, sleep_timing) = if sleep_fallback {
-        (idle_frames.clone(), idle_timing.clone())
+    // Try Sleep dir 0 first to get fallback status.
+    let (sleep_down_raw, sleep_timing_raw, _, _, sleep_fallback) =
+        load_and_scale_animation("Sleep", &sheets, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[0])?;
+    let (sleep_frames_by_dir, sleep_timing) = if sleep_fallback {
+        // Reuse Idle frames for all 4 directions
+        (slot.cached_idle.clone(), idle_timing.clone())
     } else {
-        (sleep_frames_raw, sleep_timing_raw)
+        let sleep_left = load_and_scale_animation("Sleep", &sheets, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[1])
+            .map(|r| r.0)
+            .unwrap_or_else(|_| sleep_down_raw.clone());
+        let sleep_up = load_and_scale_animation("Sleep", &sheets, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[2])
+            .map(|r| r.0)
+            .unwrap_or_else(|_| sleep_down_raw.clone());
+        let sleep_right = load_and_scale_animation("Sleep", &sheets, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[3])
+            .map(|r| r.0)
+            .unwrap_or_else(|_| sleep_down_raw.clone());
+        ([sleep_down_raw, sleep_left, sleep_up, sleep_right], sleep_timing_raw)
     };
-
-    // Store frames exclusively in the slot cache.
-    slot.cached_idle = idle_frames;
-    slot.cached_eat = eat_frames;
-    slot.cached_sleep = sleep_frames;
+    slot.cached_sleep = sleep_frames_by_dir;
 
     // Give the animator timing-only Animation objects (no pixel data).
     slot.animator = Animator::new();
@@ -492,7 +528,7 @@ fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<String>>
 
     // Invalidate encoded frames so the first render re-encodes for the actual Rect.
     slot.encoded_rect = None;
-    slot.encoded_frames = [Vec::new(), Vec::new(), Vec::new()];
+    slot.encoded_frames = std::array::from_fn(|_| std::array::from_fn(|_| Vec::new()));
 
     // Filter out warnings for animations we gracefully handled via Idle fallback.
     let filtered_warnings = if eat_fallback || sleep_fallback {
@@ -515,6 +551,9 @@ fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<String>>
 /// Load an animation, pre-scale its frames by `scale`, cap to
 /// `MAX_CACHED_FRAMES`, then normalize to `canonical_size` (if provided).
 ///
+/// `dir_row` selects which PMDCollab direction row to extract (0=Down, 2=Left,
+/// 4=Up, 6=Right). If the sheet doesn't have that row, falls back to row 0.
+///
 /// Returns `(frames, timing_animation, frame_width, frame_height, is_fallback)`.
 /// `is_fallback` is `true` when the animation was missing and a fallback frame
 /// was used — callers can substitute Idle frames to avoid a broken placeholder.
@@ -525,6 +564,7 @@ fn load_and_scale_animation(
     anim_infos: &HashMap<String, AnimInfo>,
     scale: u32,
     canonical_size: Option<(u32, u32)>,
+    dir_row: u32,
 ) -> Result<(Vec<image::DynamicImage>, Animation, u32, u32, bool)> {
     let sheet_path = sheets
         .iter()
@@ -536,7 +576,11 @@ fn load_and_scale_animation(
     let (raw_frames, raw_durations, is_fallback) = match (sheet_path, anim_info) {
         (Some(path), Some(info)) => {
             let sheet = image::ImageReader::open(path)?.decode()?;
-            let frames = sprite_sheet::extract_frames(&sheet, info);
+            // Try requested direction row; fall back to row 0 if out of bounds.
+            let mut frames = sprite_sheet::extract_frames(&sheet, info, dir_row);
+            if frames.is_empty() && dir_row != 0 {
+                frames = sprite_sheet::extract_frames(&sheet, info, 0);
+            }
             if frames.is_empty() {
                 let fallback = sprite::fallback::create_fallback_frame()?;
                 (vec![fallback], vec![20u32], true)
@@ -597,31 +641,115 @@ fn load_and_scale_animation(
 /// a frame is a cheap table lookup — no DynamicImage copies, no alloc/free
 /// churn.
 ///
+/// Encodes all 4 directions (Down/Left/Up/Right) for each of the 3 states
+/// (Idle/Eat/Sleep), giving `encoded_frames[state][dir][frame]`.
+///
 /// Memory: each `Protocol::Halfblocks` stores only `Vec<HalfBlock>` + a
-/// `Rect`, no source image.  8 frames × 3 states × 6 slots ≈ 5.8 MB total.
+/// `Rect`, no source image.  8 frames × 4 dirs × 3 states × 6 slots ≈ 23 MB total.
 fn encode_all_frames(slot: &mut CreatureSlot, picker: &Picker, area: Rect) {
-    // Collect each state's encoded frames sequentially to avoid simultaneous
-    // shared+mutable borrows of `slot`.
-    let idle_encoded: Vec<Option<Protocol>> = slot
-        .cached_idle
-        .iter()
-        .map(|img| picker.new_protocol(img.clone(), area, Resize::Fit(None)).ok())
-        .collect();
+    // Clone caches to avoid simultaneous shared+mutable borrows of `slot`.
+    let idle = slot.cached_idle.clone();
+    let eat = slot.cached_eat.clone();
+    let sleep = slot.cached_sleep.clone();
 
-    let eat_encoded: Vec<Option<Protocol>> = slot
-        .cached_eat
-        .iter()
-        .map(|img| picker.new_protocol(img.clone(), area, Resize::Fit(None)).ok())
-        .collect();
+    let caches: [&[Vec<image::DynamicImage>; 4]; 3] = [&idle, &eat, &sleep];
 
-    let sleep_encoded: Vec<Option<Protocol>> = slot
-        .cached_sleep
-        .iter()
-        .map(|img| picker.new_protocol(img.clone(), area, Resize::Fit(None)).ok())
-        .collect();
-
-    slot.encoded_frames = [idle_encoded, eat_encoded, sleep_encoded];
+    slot.encoded_frames = std::array::from_fn(|state_idx| {
+        let cache = caches[state_idx];
+        std::array::from_fn(|dir_idx| {
+            cache[dir_idx]
+                .iter()
+                .map(|img| picker.new_protocol(img.clone(), area, Resize::Fit(None)).ok())
+                .collect()
+        })
+    });
     slot.encoded_rect = Some(area);
+}
+
+// ── Direction + collision helpers ─────────────────────────────────────────────
+
+/// Map velocity to a cardinal direction index.
+/// Returns: 0=Down, 1=Left, 2=Up, 3=Right
+fn velocity_to_dir(vel_x: f32, vel_y: f32) -> usize {
+    if vel_x.abs() < 0.01 && vel_y.abs() < 0.01 {
+        return 0; // stationary → face down
+    }
+    // In terminal space: vel_y positive = moving down screen
+    let angle = vel_y.atan2(vel_x); // atan2(y, x)
+    use std::f32::consts::PI;
+    let p4 = PI / 4.0;
+    if angle > -p4 && angle <= p4 {
+        3 // Right
+    } else if angle > p4 && angle <= 3.0 * p4 {
+        0 // Down
+    } else if angle > -3.0 * p4 && angle <= -p4 {
+        2 // Up
+    } else {
+        1 // Left
+    }
+}
+
+/// Elastic circle collision between all creature pairs.
+/// Treats each sprite as a circle with radius = min(sprite_w, sprite_h) / 2 cells.
+/// Pushes overlapping pairs apart and reflects velocity along the collision normal.
+fn resolve_collisions(slots: &mut Vec<CreatureSlot>, sprite_w: u16, sprite_h: u16, pen_w: u16, pen_h: u16) {
+    let n = slots.len();
+    if n < 2 {
+        return;
+    }
+
+    let radius = (sprite_w.min(sprite_h) as f32) / 2.0;
+    let min_dist = radius * 2.0;
+    let hw = sprite_w as f32 / 2.0;
+    let hh = sprite_h as f32 / 2.0;
+
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let cx_i = slots[i].pos_x + hw;
+            let cy_i = slots[i].pos_y + hh;
+            let cx_j = slots[j].pos_x + hw;
+            let cy_j = slots[j].pos_y + hh;
+
+            let dx = cx_j - cx_i;
+            let dy = cy_j - cy_i;
+            let dist_sq = dx * dx + dy * dy;
+
+            if dist_sq >= min_dist * min_dist || dist_sq < 0.001 {
+                continue;
+            }
+
+            let dist = dist_sq.sqrt();
+            let nx = dx / dist;
+            let ny = dy / dist;
+
+            // Push apart so they no longer overlap
+            let overlap = (min_dist - dist) / 2.0;
+            slots[i].pos_x -= nx * overlap;
+            slots[i].pos_y -= ny * overlap;
+            slots[j].pos_x += nx * overlap;
+            slots[j].pos_y += ny * overlap;
+
+            // Elastic collision: reflect relative velocity along normal
+            let dv_x = slots[j].vel_x - slots[i].vel_x;
+            let dv_y = slots[j].vel_y - slots[i].vel_y;
+            let dot = dv_x * nx + dv_y * ny;
+            if dot < 0.0 {
+                // Only apply impulse if approaching (dot < 0)
+                slots[i].vel_x += dot * nx;
+                slots[i].vel_y += dot * ny;
+                slots[j].vel_x -= dot * nx;
+                slots[j].vel_y -= dot * ny;
+            }
+        }
+    }
+
+    // Re-clamp positions to pen bounds after collision resolution
+    let max_x = (pen_w as f32 - sprite_w as f32).max(0.0);
+    let max_y = (pen_h as f32 - sprite_h as f32 - 1.0).max(0.0);
+    for slot in slots.iter_mut() {
+        slot.pos_x = slot.pos_x.clamp(0.0, max_x);
+        slot.pos_y = slot.pos_y.clamp(0.0, max_y);
+    }
 }
 
 // ── Application entry point ────────────────────────────────────────────────────
@@ -853,6 +981,7 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
     // Size rect used for protocol encoding (position 0,0 — decoupled from render pos).
     let size_rect = Rect::new(0, 0, sprite_w, sprite_h);
 
+    // Phase 1: initialize positions, update movement, and set direction for all slots.
     for i in 0..count {
         let slot = &mut app.slots[i];
 
@@ -874,10 +1003,21 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
         // Update position for this tick.
         slot.update_position(pen_inner.width, pen_inner.height, sprite_w, sprite_h);
 
+        // Compute facing direction from velocity.
+        slot.current_dir = velocity_to_dir(slot.vel_x, slot.vel_y);
+
         // Lazily encode (or re-encode on resize) — compare size only, not position.
         if slot.encoded_rect != Some(size_rect) {
             encode_all_frames(slot, picker, size_rect);
         }
+    }
+
+    // Phase 2: resolve creature-to-creature collisions (elastic bounce).
+    resolve_collisions(&mut app.slots, sprite_w, sprite_h, pen_inner.width, pen_inner.height);
+
+    // Phase 3: render each slot at its final position.
+    for i in 0..count {
+        let slot = &mut app.slots[i];
 
         let state = slot.animator.state();
         let frame_idx = slot.animator.current_frame_index().unwrap_or(0);
@@ -886,6 +1026,7 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
             AnimationState::Eating => 1,
             AnimationState::Sleeping => 2,
         };
+        let dir_idx = slot.current_dir;
 
         // Build render rect from creature's current position.
         let render_x = (pen_inner.x + slot.pos_x.round() as u16)
@@ -896,7 +1037,8 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
 
         // Render sprite (or "Loading…" fallback).
         match slot.encoded_frames[state_idx]
-            .get_mut(frame_idx)
+            .get_mut(dir_idx)
+            .and_then(|dir_frames| dir_frames.get_mut(frame_idx))
             .and_then(|opt| opt.as_mut())
         {
             Some(protocol) => f.render_widget(Image::new(protocol), img_area),

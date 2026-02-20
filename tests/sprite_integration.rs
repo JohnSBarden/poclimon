@@ -45,7 +45,7 @@ fn test_pikachu_sprite_download_and_frame_extraction() {
     assert!(dl.status.success(), "Sprite sheet download should succeed");
 
     let sheet = image::open(&sheet_path).expect("Should open sprite sheet PNG");
-    let frames = sprite_sheet::extract_frames(&sheet, idle);
+    let frames = sprite_sheet::extract_frames(&sheet, idle, 0);
 
     // Frame count from extraction should match AnimData duration count
     assert_eq!(
