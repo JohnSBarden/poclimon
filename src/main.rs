@@ -118,8 +118,17 @@ struct CreatureSlot {
     /// `None` entries mean encoding failed for that frame (fallback shown).
     /// Rebuilt whenever `encoded_rect` changes (terminal resize or first render).
     encoded_frames: [Vec<Option<Protocol>>; 3],
-    /// The `Rect` these protocols were encoded for. `None` means not yet encoded.
+    /// The size `Rect` (position 0,0) these protocols were encoded for.
+    /// `None` means not yet encoded. Position-independent — re-encode only on resize.
     encoded_rect: Option<Rect>,
+    /// Current X position in terminal cells, relative to pen_inner.x.
+    pub pos_x: f32,
+    /// Current Y position in terminal cells, relative to pen_inner.y.
+    pub pos_y: f32,
+    /// Horizontal velocity in cells per 50ms tick.
+    pub vel_x: f32,
+    /// Vertical velocity in cells per 50ms tick.
+    pub vel_y: f32,
 }
 
 impl CreatureSlot {
@@ -133,6 +142,57 @@ impl CreatureSlot {
             cached_sleep: Vec::new(),
             encoded_frames: [Vec::new(), Vec::new(), Vec::new()],
             encoded_rect: None,
+            pos_x: 0.0,
+            pos_y: 0.0,
+            vel_x: 0.0,
+            vel_y: 0.0,
+        }
+    }
+
+    /// Update this creature's position and velocity for one 50ms tick.
+    ///
+    /// Applies occasional random velocity perturbations for organic wandering,
+    /// then bounces off the pen walls. Creatures may overlap — collision
+    /// detection is a future TODO.
+    pub fn update_position(&mut self, pen_w: u16, pen_h: u16, sprite_w: u16, sprite_h: u16) {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+
+        // Occasionally perturb velocity (roughly every 3 seconds = 60 ticks at 50ms)
+        if rng.r#gen::<f32>() < 0.017 {
+            self.vel_x += rng.gen_range(-0.15..0.15);
+            self.vel_y += rng.gen_range(-0.15..0.15);
+            // Clamp velocity to keep creatures moving at a reasonable pace
+            self.vel_x = self.vel_x.clamp(-0.4, 0.4);
+            self.vel_y = self.vel_y.clamp(-0.3, 0.3);
+            // Ensure minimum speed so they don't stop
+            if self.vel_x.abs() < 0.05 {
+                self.vel_x = if self.vel_x >= 0.0 { 0.1 } else { -0.1 };
+            }
+        }
+
+        self.pos_x += self.vel_x;
+        self.pos_y += self.vel_y;
+
+        // Bounce off pen walls
+        let max_x = (pen_w as f32 - sprite_w as f32).max(0.0);
+        let max_y = (pen_h as f32 - sprite_h as f32 - 1.0).max(0.0); // -1 for label row
+
+        if self.pos_x < 0.0 {
+            self.pos_x = 0.0;
+            self.vel_x = self.vel_x.abs();
+        }
+        if self.pos_x > max_x {
+            self.pos_x = max_x;
+            self.vel_x = -self.vel_x.abs();
+        }
+        if self.pos_y < 0.0 {
+            self.pos_y = 0.0;
+            self.vel_y = self.vel_y.abs();
+        }
+        if self.pos_y > max_y {
+            self.pos_y = max_y;
+            self.vel_y = -self.vel_y.abs();
         }
     }
 }
@@ -389,6 +449,10 @@ fn cap_frames(
 /// Returns a Vec of non-fatal warning strings (e.g., a missing animation
 /// sheet that was replaced with a fallback). These are shown as in-TUI
 /// notifications rather than written to stderr.
+///
+/// Creatures missing an Eat or Sleep animation (e.g. Articuno, Zapdos, Moltres,
+/// Vaporeon) silently fall back to their Idle frames — no yellow "?" placeholder,
+/// no size change on state switch, no warning noise.
 fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<String>> {
     let (anim_data_path, sheets, warnings) = sprite::download_all_sprites(slot.creature_id)?;
 
@@ -396,14 +460,26 @@ fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<String>>
     let anim_infos = anim_data::parse_anim_data(&xml);
 
     // Load Idle first to establish the canonical frame size.
-    let (idle_frames, idle_timing, idle_w, idle_h) =
+    let (idle_frames, idle_timing, idle_w, idle_h, _) =
         load_and_scale_animation("Idle", &sheets, &anim_infos, scale, None)?;
 
-    let (eat_frames, eat_timing, _, _) =
+    // Try Eat — if fallback (no sprite in PMDCollab), reuse Idle silently.
+    let (eat_frames_raw, eat_timing_raw, _, _, eat_fallback) =
         load_and_scale_animation("Eat", &sheets, &anim_infos, scale, Some((idle_w, idle_h)))?;
+    let (eat_frames, eat_timing) = if eat_fallback {
+        (idle_frames.clone(), idle_timing.clone())
+    } else {
+        (eat_frames_raw, eat_timing_raw)
+    };
 
-    let (sleep_frames, sleep_timing, _, _) =
+    // Try Sleep — if fallback (no sprite in PMDCollab), reuse Idle silently.
+    let (sleep_frames_raw, sleep_timing_raw, _, _, sleep_fallback) =
         load_and_scale_animation("Sleep", &sheets, &anim_infos, scale, Some((idle_w, idle_h)))?;
+    let (sleep_frames, sleep_timing) = if sleep_fallback {
+        (idle_frames.clone(), idle_timing.clone())
+    } else {
+        (sleep_frames_raw, sleep_timing_raw)
+    };
 
     // Store frames exclusively in the slot cache.
     slot.cached_idle = idle_frames;
@@ -418,13 +494,30 @@ fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<String>>
     slot.encoded_rect = None;
     slot.encoded_frames = [Vec::new(), Vec::new(), Vec::new()];
 
-    Ok(warnings)
+    // Filter out warnings for animations we gracefully handled via Idle fallback.
+    let filtered_warnings = if eat_fallback || sleep_fallback {
+        warnings
+            .into_iter()
+            .filter(|w| {
+                let w_lower = w.to_lowercase();
+                // Keep warnings that aren't about the animations we handled
+                !(eat_fallback && w_lower.contains("eat"))
+                    && !(sleep_fallback && w_lower.contains("sleep"))
+            })
+            .collect()
+    } else {
+        warnings
+    };
+
+    Ok(filtered_warnings)
 }
 
 /// Load an animation, pre-scale its frames by `scale`, cap to
 /// `MAX_CACHED_FRAMES`, then normalize to `canonical_size` (if provided).
 ///
-/// Returns `(frames, timing_animation, frame_width, frame_height)`.
+/// Returns `(frames, timing_animation, frame_width, frame_height, is_fallback)`.
+/// `is_fallback` is `true` when the animation was missing and a fallback frame
+/// was used — callers can substitute Idle frames to avoid a broken placeholder.
 /// The returned `Animation` is timing-only — no pixel data.
 fn load_and_scale_animation(
     anim_name: &str,
@@ -432,7 +525,7 @@ fn load_and_scale_animation(
     anim_infos: &HashMap<String, AnimInfo>,
     scale: u32,
     canonical_size: Option<(u32, u32)>,
-) -> Result<(Vec<image::DynamicImage>, Animation, u32, u32)> {
+) -> Result<(Vec<image::DynamicImage>, Animation, u32, u32, bool)> {
     let sheet_path = sheets
         .iter()
         .find(|(name, _)| name == anim_name)
@@ -440,21 +533,21 @@ fn load_and_scale_animation(
 
     let anim_info = anim_infos.get(anim_name);
 
-    let (raw_frames, raw_durations) = match (sheet_path, anim_info) {
+    let (raw_frames, raw_durations, is_fallback) = match (sheet_path, anim_info) {
         (Some(path), Some(info)) => {
             let sheet = image::ImageReader::open(path)?.decode()?;
             let frames = sprite_sheet::extract_frames(&sheet, info);
             if frames.is_empty() {
                 let fallback = sprite::fallback::create_fallback_frame()?;
-                (vec![fallback], vec![20u32])
+                (vec![fallback], vec![20u32], true)
             } else {
                 let durations = info.durations.clone();
-                (frames, durations)
+                (frames, durations, false)
             }
         }
         _ => {
             let fallback = sprite::fallback::create_fallback_frame()?;
-            (vec![fallback], vec![20u32])
+            (vec![fallback], vec![20u32], true)
         }
     };
 
@@ -491,7 +584,7 @@ fn load_and_scale_animation(
     // Build a timing-only Animation aligned to the final frame count.
     let timing = Animation::new(final_frames.len(), &capped_durations);
 
-    Ok((final_frames, timing, out_w, out_h))
+    Ok((final_frames, timing, out_w, out_h, is_fallback))
 }
 
 // ── Protocol encoding ──────────────────────────────────────────────────────────
@@ -731,12 +824,14 @@ fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker) {
 
 /// Render all creatures in a single shared pen with no internal borders.
 ///
-/// A single outer border wraps the pen area.  Creatures are spaced evenly
-/// along the horizontal axis; a name label below each sprite acts as the
-/// selection indicator (Yellow + ▲ for selected, DarkGray for others).
+/// A single outer border wraps the pen area. Creatures wander freely using
+/// `pos_x`/`pos_y` + `vel_x`/`vel_y`, bouncing off walls, overlapping freely
+/// (later slots render on top). Name labels follow each sprite.
 ///
-/// Protocols are pre-encoded on first render for a given `Rect` and reused
-/// each frame (zero alloc/free churn during animation).
+/// Sprite protocols are encoded at a fixed size `(sprite_w, sprite_h)` at
+/// position `(0,0)` — position-independent. They are only re-encoded when
+/// the pen size changes (terminal resize). At render time the widget is
+/// placed at the creature's current position.
 fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker) {
     let count = app.slots.len();
     if count == 0 {
@@ -745,33 +840,43 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
 
     // Single outer border — no inner dividers.
     let block = Block::default().borders(Borders::ALL).title("🌿 Pen");
-    let inner = block.inner(area);
+    let pen_inner = block.inner(area);
     f.render_widget(block, area);
 
     let selected = app.selected;
 
+    // Sprite size: same column-width logic as before, but now position-independent.
+    // sprite_h reserves 1 row at the bottom for the name label.
+    let sprite_w = pen_inner.width / MAX_SLOTS as u16;
+    let sprite_h = pen_inner.height.saturating_sub(1);
+
+    // Size rect used for protocol encoding (position 0,0 — decoupled from render pos).
+    let size_rect = Rect::new(0, 0, sprite_w, sprite_h);
+
     for i in 0..count {
-        let creature_region = compute_creature_region(inner, i, count);
-
-        // Reserve the last row for the name label.
-        let img_h = creature_region.height.saturating_sub(1);
-        let img_area = Rect::new(
-            creature_region.x,
-            creature_region.y,
-            creature_region.width,
-            img_h,
-        );
-
-        let label_y = creature_region.y + img_h;
-        let label_in_bounds = label_y < inner.y + inner.height;
-
         let slot = &mut app.slots[i];
 
-        // Lazily encode all frames for this slot when the render Rect changes
-        // (first render or terminal resize). This is the ONLY place protocols
-        // are created — update_all_displays only ticks animators.
-        if slot.encoded_rect != Some(img_area) {
-            encode_all_frames(slot, picker, img_area);
+        // First time this slot enters the pen: randomize position and velocity.
+        if slot.encoded_rect.is_none() {
+            use rand::Rng;
+            let mut rng = rand::thread_rng();
+            let max_px = (pen_inner.width.saturating_sub(sprite_w)) as f32;
+            let max_py = (pen_inner.height.saturating_sub(sprite_h + 1)) as f32;
+            slot.pos_x = rng.gen_range(0.0..=max_px.max(0.0));
+            slot.pos_y = rng.gen_range(0.0..=max_py.max(0.0));
+            slot.vel_x = rng.gen_range(-0.3..=0.3_f32);
+            slot.vel_y = rng.gen_range(-0.2..=0.2_f32);
+            if slot.vel_x.abs() < 0.05 {
+                slot.vel_x = 0.15;
+            }
+        }
+
+        // Update position for this tick.
+        slot.update_position(pen_inner.width, pen_inner.height, sprite_w, sprite_h);
+
+        // Lazily encode (or re-encode on resize) — compare size only, not position.
+        if slot.encoded_rect != Some(size_rect) {
+            encode_all_frames(slot, picker, size_rect);
         }
 
         let state = slot.animator.state();
@@ -781,6 +886,13 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
             AnimationState::Eating => 1,
             AnimationState::Sleeping => 2,
         };
+
+        // Build render rect from creature's current position.
+        let render_x = (pen_inner.x + slot.pos_x.round() as u16)
+            .min(pen_inner.x + pen_inner.width.saturating_sub(sprite_w));
+        let render_y = (pen_inner.y + slot.pos_y.round() as u16)
+            .min(pen_inner.y + pen_inner.height.saturating_sub(sprite_h + 1));
+        let img_area = Rect::new(render_x, render_y, sprite_w, sprite_h);
 
         // Render sprite (or "Loading…" fallback).
         match slot.encoded_frames[state_idx]
@@ -794,7 +906,9 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
             ),
         }
 
-        // Name label — selection indicator without borders.
+        // Name label — follows sprite, rendered one row below it.
+        let label_y = render_y + sprite_h;
+        let label_in_bounds = label_y < pen_inner.y + pen_inner.height;
         if label_in_bounds {
             let state_icon = match slot.animator.state() {
                 AnimationState::Idle => "",
@@ -808,7 +922,7 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
                 (Color::DarkGray, "  ")
             };
             let label = format!("{}{}{}", prefix, slot.creature_name, state_icon);
-            let label_rect = Rect::new(creature_region.x, label_y, creature_region.width, 1);
+            let label_rect = Rect::new(render_x, label_y, sprite_w, 1);
             f.render_widget(
                 Paragraph::new(label).style(Style::default().fg(name_color)),
                 label_rect,

@@ -10,7 +10,7 @@
 //! when switching states.
 
 use crate::anim_data::AnimInfo;
-use image::{DynamicImage, GenericImageView};
+use image::{DynamicImage, GenericImage, GenericImageView, RgbaImage};
 
 /// Extract individual animation frames from a sprite sheet.
 ///
@@ -44,15 +44,58 @@ pub fn extract_frames(sheet: &DynamicImage, anim_info: &AnimInfo) -> Vec<Dynamic
     frames
 }
 
-/// Normalize a set of frames to the given target dimensions using
-/// nearest-neighbor scaling.
+/// Normalize frames to the target dimensions by centering on a transparent canvas.
+/// Does NOT scale the art — just pads. Preserves pixel-perfect fidelity.
 ///
 /// This ensures that animations with different native frame sizes (e.g., Idle
 /// vs. Sleep) all render at the same size in the TUI, preventing layout jumps
-/// when the user changes animation state.
+/// when the user changes animation state. Smaller frames are centered; larger
+/// frames are cropped at the center.
 ///
 /// If a frame is already the target size it is returned as-is without copying.
 pub fn normalize_frames(
+    frames: Vec<DynamicImage>,
+    target_w: u32,
+    target_h: u32,
+) -> Vec<DynamicImage> {
+    if target_w == 0 || target_h == 0 {
+        return frames;
+    }
+
+    frames
+        .into_iter()
+        .map(|frame| {
+            let fw = frame.width();
+            let fh = frame.height();
+            if fw == target_w && fh == target_h {
+                return frame;
+            }
+            // Create transparent canvas of target size
+            let mut canvas = DynamicImage::ImageRgba8(RgbaImage::new(target_w, target_h));
+            // Center the frame on the canvas (may crop if frame is larger)
+            let dst_x = (target_w as i32 - fw as i32).max(0) as u32 / 2;
+            let dst_y = (target_h as i32 - fh as i32).max(0) as u32 / 2;
+            let src_x = (fw as i32 - target_w as i32).max(0) as u32 / 2;
+            let src_y = (fh as i32 - target_h as i32).max(0) as u32 / 2;
+            let copy_w = fw.min(target_w);
+            let copy_h = fh.min(target_h);
+            // Copy the (possibly cropped) frame into the canvas
+            let cropped = frame.crop_imm(src_x, src_y, copy_w, copy_h);
+            let _ = canvas.copy_from(&cropped, dst_x, dst_y);
+            canvas
+        })
+        .collect()
+}
+
+/// Normalize a set of frames to the given target dimensions using
+/// nearest-neighbor scaling.
+///
+/// Legacy scaling variant — kept for reference. Prefer `normalize_frames`
+/// (padding) to avoid distorting pixel art.
+///
+/// If a frame is already the target size it is returned as-is without copying.
+#[allow(dead_code)]
+pub fn normalize_frames_scale(
     frames: Vec<DynamicImage>,
     target_w: u32,
     target_h: u32,
@@ -166,12 +209,26 @@ mod tests {
 
     #[test]
     fn test_normalize_frames_resizes_to_target() {
-        // Create a 4x4 frame
-        let small = DynamicImage::ImageRgba8(RgbaImage::new(4, 4));
+        // A 4x4 frame normalized (padded) to 8x8 should:
+        // - produce an 8x8 image
+        // - the original pixels should be centered (at offset 2,2)
+        let color = Rgba([255u8, 0, 0, 255]);
+        let mut small_img = RgbaImage::new(4, 4);
+        for y in 0..4 {
+            for x in 0..4 {
+                small_img.put_pixel(x, y, color);
+            }
+        }
+        let small = DynamicImage::ImageRgba8(small_img);
         let frames = vec![small];
         let normalized = normalize_frames(frames, 8, 8);
         assert_eq!(normalized.len(), 1);
         assert_eq!(normalized[0].dimensions(), (8, 8));
+        // Centering: dst_x = (8 - 4) / 2 = 2, dst_y = (8 - 4) / 2 = 2
+        // The original red pixel at (0,0) maps to (2,2) in the canvas
+        assert_eq!(normalized[0].get_pixel(2, 2), color);
+        // Corners of canvas should be transparent
+        assert_eq!(normalized[0].get_pixel(0, 0), Rgba([0, 0, 0, 0]));
     }
 
     #[test]
