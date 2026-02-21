@@ -15,25 +15,35 @@ use image::{DynamicImage, GenericImage, GenericImageView, RgbaImage};
 /// Extract individual animation frames from a sprite sheet.
 ///
 /// The sprite sheet layout:
-/// - Each row is a direction (row 0 = Down, facing the viewer)
+/// - Each row is a direction (row 0 = Down, row 2 = Left, row 4 = Up, row 6 = Right)
 /// - Each column is a frame
 /// - Frame size is defined by `anim_info.frame_width` x `anim_info.frame_height`
 ///
+/// `dir_row` selects which row of the sheet to extract from.
+/// If the row is out of bounds (sheet lacks that direction), returns an empty Vec.
+/// The caller is responsible for fallback handling.
+///
 /// Returns a `Vec` of cropped frame images, one per frame in the animation.
-pub fn extract_frames(sheet: &DynamicImage, anim_info: &AnimInfo) -> Vec<DynamicImage> {
+pub fn extract_frames(sheet: &DynamicImage, anim_info: &AnimInfo, dir_row: u32) -> Vec<DynamicImage> {
     let frame_count = anim_info.frame_count();
     let fw = anim_info.frame_width;
     let fh = anim_info.frame_height;
     let (sheet_w, sheet_h) = sheet.dimensions();
 
+    let y = dir_row * fh;
+
+    // If requested row is out of bounds, return empty — caller handles fallback.
+    if y + fh > sheet_h {
+        return Vec::new();
+    }
+
     let mut frames = Vec::with_capacity(frame_count);
 
     for col in 0..frame_count {
         let x = col as u32 * fw;
-        let y = 0; // Row 0 = Down direction
 
-        // Make sure we don't go out of bounds
-        if x + fw > sheet_w || y + fh > sheet_h {
+        // Make sure we don't go out of bounds horizontally
+        if x + fw > sheet_w {
             break;
         }
 
@@ -165,7 +175,7 @@ mod tests {
     fn test_extract_correct_frame_count() {
         let sheet = make_test_sheet();
         let info = make_test_anim_info();
-        let frames = extract_frames(&sheet, &info);
+        let frames = extract_frames(&sheet, &info, 0);
         assert_eq!(frames.len(), 3);
     }
 
@@ -173,7 +183,7 @@ mod tests {
     fn test_extract_correct_frame_dimensions() {
         let sheet = make_test_sheet();
         let info = make_test_anim_info();
-        let frames = extract_frames(&sheet, &info);
+        let frames = extract_frames(&sheet, &info, 0);
         for frame in &frames {
             assert_eq!(frame.dimensions(), (10, 10));
         }
@@ -183,7 +193,7 @@ mod tests {
     fn test_extract_correct_frame_colors() {
         let sheet = make_test_sheet();
         let info = make_test_anim_info();
-        let frames = extract_frames(&sheet, &info);
+        let frames = extract_frames(&sheet, &info, 0);
 
         // Frame 0 should be red
         assert_eq!(frames[0].get_pixel(5, 5), Rgba([255, 0, 0, 255]));
@@ -202,8 +212,26 @@ mod tests {
             frame_height: 10,
             durations: vec![5, 5, 5, 5, 5],
         };
-        let frames = extract_frames(&sheet, &info);
+        let frames = extract_frames(&sheet, &info, 0);
         // Should only extract 3 frames (stops at sheet boundary)
+        assert_eq!(frames.len(), 3);
+    }
+
+    #[test]
+    fn test_extract_out_of_bounds_row_returns_empty() {
+        let sheet = make_test_sheet(); // 8 rows (fh=10, total height=80)
+        let info = make_test_anim_info();
+        // Row 8 would start at y=80 which equals sheet_h=80 — out of bounds
+        let frames = extract_frames(&sheet, &info, 8);
+        assert!(frames.is_empty());
+    }
+
+    #[test]
+    fn test_extract_last_valid_row() {
+        let sheet = make_test_sheet(); // 8 rows
+        let info = make_test_anim_info();
+        // Row 7 starts at y=70, ends at y=80 — exactly in bounds
+        let frames = extract_frames(&sheet, &info, 7);
         assert_eq!(frames.len(), 3);
     }
 
