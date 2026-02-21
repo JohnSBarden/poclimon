@@ -72,6 +72,13 @@ const MAX_CACHED_FRAMES: usize = 8;
 /// shifts existing columns (which would invalidate all encoded Protocols).
 const MAX_SLOTS: usize = 6;
 
+/// Fixed sprite render size in terminal cells. All sprites are this size
+/// regardless of pen dimensions. 32×32 gives a clear, consistent look.
+const SPRITE_W: u16 = 32;
+const SPRITE_H: u16 = 16; // 16 rows ≈ 32 cols visually square (cells are ~2:1 h:w ratio)
+
+const LABEL_H: u16 = 4; // 1 top border + 2 content rows + 1 bottom border
+
 // ── Notification system ────────────────────────────────────────────────────────
 
 /// Maximum number of notifications to keep in the deque at once.
@@ -205,6 +212,9 @@ impl CreatureSlot {
             self.vel_x = new_vx;
             self.vel_y = new_vy;
 
+            // Lock direction for the entire heading — only update here, never from live velocity.
+            self.current_dir = velocity_to_dir(new_vx, new_vy);
+
             // Hold this direction for 2–8 seconds (40–160 ticks).
             self.dir_hold_ticks = rng.gen_range(40_u32..160);
         } else {
@@ -221,7 +231,7 @@ impl CreatureSlot {
 
         // Bounce off pen walls.
         let max_x = (pen_w as f32 - sprite_w as f32).max(0.0);
-        let max_y = (pen_h as f32 - sprite_h as f32 - 1.0).max(0.0);
+        let max_y = (pen_h as f32 - sprite_h as f32 - LABEL_H as f32).max(0.0);
 
         if self.pos_x < 0.0       { self.pos_x = 0.0;   self.vel_x =  self.vel_x.abs(); }
         if self.pos_x > max_x     { self.pos_x = max_x;  self.vel_x = -self.vel_x.abs(); }
@@ -773,7 +783,7 @@ fn resolve_collisions(slots: &mut Vec<CreatureSlot>, sprite_w: u16, sprite_h: u1
 
     // Re-clamp positions to pen bounds after collision resolution
     let max_x = (pen_w as f32 - sprite_w as f32).max(0.0);
-    let max_y = (pen_h as f32 - sprite_h as f32 - 1.0).max(0.0);
+    let max_y = (pen_h as f32 - sprite_h as f32 - LABEL_H as f32).max(0.0);
     for slot in slots.iter_mut() {
         slot.pos_x = slot.pos_x.clamp(0.0, max_x);
         slot.pos_y = slot.pos_y.clamp(0.0, max_y);
@@ -1001,13 +1011,12 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
 
     let selected = app.selected;
 
-    // Sprite size: same column-width logic as before, but now position-independent.
-    // sprite_h reserves 1 row at the bottom for the name label.
-    let sprite_w = pen_inner.width / MAX_SLOTS as u16;
-    let sprite_h = pen_inner.height; // full height — label is beside, not below
+    // Sprite size: fixed constants — same for all creatures regardless of pen dimensions.
+    let sprite_w = SPRITE_W;
+    let sprite_h = SPRITE_H;
 
     // Size rect used for protocol encoding (position 0,0 — decoupled from render pos).
-    let size_rect = Rect::new(0, 0, sprite_w, sprite_h);
+    let size_rect = Rect::new(0, 0, SPRITE_W, SPRITE_H);
 
     // Phase 1: initialize positions, update movement, and set direction for all slots.
     for i in 0..count {
@@ -1018,9 +1027,15 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
             use rand::Rng;
             let mut rng = rand::thread_rng();
             let max_px = (pen_inner.width.saturating_sub(sprite_w)) as f32;
-            let max_py = (pen_inner.height.saturating_sub(sprite_h + 1)) as f32;
+            let max_py = (pen_inner.height.saturating_sub(sprite_h + LABEL_H)) as f32;
             slot.pos_x = rng.gen_range(0.0..=max_px.max(0.0));
-            slot.pos_y = rng.gen_range(0.0..=max_py.max(0.0));
+            // Staggered vertical start: divide pen height into count slots.
+            // Each creature gets its own slot so they start spread out vertically.
+            let y_step = if count > 1 { max_py / (count - 1) as f32 } else { 0.0 };
+            let base_y = i as f32 * y_step;
+            // Small random jitter (±20% of step) so they don't look rigidly spaced.
+            let jitter = rng.gen_range(-y_step * 0.2..=y_step * 0.2_f32);
+            slot.pos_y = (base_y + jitter).clamp(0.0, max_py.max(0.0));
             slot.vel_x = rng.gen_range(-0.4..=0.4_f32);
             slot.vel_y = rng.gen_range(-0.4..=0.4_f32);
             if slot.vel_x.abs() < 0.12 { slot.vel_x = if slot.vel_x >= 0.0 { 0.18 } else { -0.18 }; }
@@ -1029,14 +1044,9 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
         }
 
         // Update position for this tick (frozen during eating/sleeping).
+        // Direction is locked inside update_position when a new heading is picked.
         let is_moving = matches!(slot.animator.state(), AnimationState::Idle);
         slot.update_position(pen_inner.width, pen_inner.height, sprite_w, sprite_h, is_moving);
-
-        // Only update direction when actually moving and not mid-pause.
-        if is_moving && slot.pause_ticks == 0 {
-            slot.current_dir = velocity_to_dir(slot.vel_x, slot.vel_y);
-        }
-        // (else keep existing current_dir — face the last direction)
 
         // Lazily encode (or re-encode on resize) — compare size only, not position.
         if slot.encoded_rect != Some(size_rect) {
@@ -1045,7 +1055,7 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
     }
 
     // Phase 2: resolve creature-to-creature collisions (elastic bounce).
-    resolve_collisions(&mut app.slots, sprite_w, sprite_h, pen_inner.width, pen_inner.height);
+    resolve_collisions(&mut app.slots, SPRITE_W, SPRITE_H, pen_inner.width, pen_inner.height);
 
     // Phase 3: render each slot at its final position.
     for i in 0..count {
@@ -1064,7 +1074,7 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
         let render_x = (pen_inner.x + slot.pos_x.round() as u16)
             .min(pen_inner.x + pen_inner.width.saturating_sub(sprite_w));
         let render_y = (pen_inner.y + slot.pos_y.round() as u16)
-            .min(pen_inner.y + pen_inner.height.saturating_sub(sprite_h + 1));
+            .min(pen_inner.y + pen_inner.height.saturating_sub(sprite_h + LABEL_H));
         let img_area = Rect::new(render_x, render_y, sprite_w, sprite_h);
 
         // Render sprite (or "Loading…" fallback).
@@ -1080,53 +1090,44 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
             ),
         }
 
-        // ── GB-style side label ──────────────────────────────────────────────
-        // Two rows of text beside the sprite. Try right, then left, then skip.
-        let label_w = sprite_w.max(8); // at least 8 cells wide
-        let label_h = 2u16;
+        // ── Static label below sprite ─────────────────────────────────────────────
+        // The label is always directly below the sprite. It has the same width
+        // and a bounding box matching the rest of the TUI style.
+        let label_x = render_x;
+        let label_y = render_y + sprite_h;
 
-        // Try to place label to the right of sprite.
-        let right_x = render_x + sprite_w;
-        let can_fit_right = right_x + label_w <= pen_inner.x + pen_inner.width;
+        if label_y + LABEL_H <= pen_inner.y + pen_inner.height {
+            let label_area = Rect::new(label_x, label_y, sprite_w, LABEL_H);
 
-        // Try to place label to the left.
-        let can_fit_left = render_x >= pen_inner.x + label_w;
+            // Bounding box — same style as the pen and other TUI panels.
+            let block = Block::default().borders(Borders::ALL);
+            let inner = block.inner(label_area);
+            f.render_widget(block, label_area);
 
-        let label_x = if can_fit_right {
-            right_x
-        } else if can_fit_left {
-            render_x - label_w
-        } else {
-            // No room either side — skip label this frame.
-            continue;
-        };
-
-        // Vertically align label to top of sprite.
-        let label_y = render_y;
-
-        if label_y + label_h <= pen_inner.y + pen_inner.height {
+            // Row 1: pokéball indicator + name in uppercase.
             let is_selected = selected == i;
-            let chevron = if is_selected { "▶ " } else { "  " };
+            let pokeball = if is_selected { "◉ " } else { "  " };
+            let name_str = format!("{}{}", pokeball, slot.creature_name.to_uppercase());
             let name_color = if is_selected { Color::Yellow } else { Color::White };
 
-            let name_line = format!("{}{}", chevron, slot.creature_name.to_uppercase());
+            // Row 2: level + state icon.
             let state_icon = match slot.animator.state() {
-                AnimationState::Idle     => "  ",
-                AnimationState::Eating   => "🍖",
-                AnimationState::Sleeping => "💤",
+                AnimationState::Idle    => "",
+                AnimationState::Eating  => " 🍖",
+                AnimationState::Sleeping => " 💤",
             };
-            let level_line = format!("  Lv.1 {}", state_icon);
+            let level_str = format!("  Lv.1{}", state_icon);
 
-            let label_rect_row0 = Rect::new(label_x, label_y,     label_w, 1);
-            let label_rect_row1 = Rect::new(label_x, label_y + 1, label_w, 1);
+            let row1 = Rect::new(inner.x, inner.y,     inner.width, 1);
+            let row2 = Rect::new(inner.x, inner.y + 1, inner.width, 1);
 
             f.render_widget(
-                Paragraph::new(name_line).style(Style::default().fg(name_color)),
-                label_rect_row0,
+                Paragraph::new(name_str).style(Style::default().fg(name_color)),
+                row1,
             );
             f.render_widget(
-                Paragraph::new(level_line).style(Style::default().fg(Color::Green)),
-                label_rect_row1,
+                Paragraph::new(level_str).style(Style::default().fg(Color::DarkGray)),
+                row2,
             );
         }
     }
