@@ -133,6 +133,12 @@ struct CreatureSlot {
     pub vel_y: f32,
     /// Current direction index: 0=Down, 1=Left, 2=Up, 3=Right.
     pub current_dir: usize,
+    /// Ticks remaining holding the current direction before picking a new one.
+    /// When it hits 0, pick a new velocity and reset to a random 2-8 second hold.
+    pub dir_hold_ticks: u32,
+    /// Ticks remaining in a direction-change pause (standing idle before walking).
+    /// While > 0, position does NOT update. Reset to 0 when walking resumes.
+    pub pause_ticks: u32,
 }
 
 impl CreatureSlot {
@@ -151,54 +157,76 @@ impl CreatureSlot {
             vel_x: 0.0,
             vel_y: 0.0,
             current_dir: 0,
+            dir_hold_ticks: 0,
+            pause_ticks: 0,
         }
     }
 
-    /// Update this creature's position and velocity for one 50ms tick.
+    /// Update position and movement timers for one 50ms tick.
     ///
-    /// Applies occasional random velocity perturbations for organic wandering,
-    /// then bounces off the pen walls. Creatures may overlap — collision
-    /// detection is a future TODO.
-    pub fn update_position(&mut self, pen_w: u16, pen_h: u16, sprite_w: u16, sprite_h: u16) {
+    /// `is_moving` should be `true` only when the creature is in the Idle animation
+    /// state. Eating/sleeping creatures have timers ticked but position frozen.
+    pub fn update_position(
+        &mut self,
+        pen_w: u16,
+        pen_h: u16,
+        sprite_w: u16,
+        sprite_h: u16,
+        is_moving: bool,
+    ) {
         use rand::Rng;
         let mut rng = rand::thread_rng();
 
-        // Occasionally perturb velocity (roughly every 3 seconds = 60 ticks at 50ms)
-        if rng.r#gen::<f32>() < 0.017 {
-            self.vel_x += rng.gen_range(-0.15..0.15);
-            self.vel_y += rng.gen_range(-0.15..0.15);
-            // Clamp velocity to keep creatures moving at a reasonable pace
-            self.vel_x = self.vel_x.clamp(-0.4, 0.4);
-            self.vel_y = self.vel_y.clamp(-0.3, 0.3);
-            // Ensure minimum speed so they don't stop
-            if self.vel_x.abs() < 0.05 {
-                self.vel_x = if self.vel_x >= 0.0 { 0.1 } else { -0.1 };
+        // ── Direction-change pause ───────────────────────────────────────────
+        // Creature stands still briefly when switching direction.
+        if self.pause_ticks > 0 {
+            self.pause_ticks -= 1;
+            return; // Frozen in place — no movement or timer updates this tick.
+        }
+
+        // ── Direction hold timer ─────────────────────────────────────────────
+        // When the hold timer hits 0, pick a new direction.
+        if self.dir_hold_ticks == 0 {
+            let new_vx = rng.gen_range(-0.4_f32..=0.4);
+            let new_vy = rng.gen_range(-0.4_f32..=0.4);
+
+            // Apply minimum speed so creatures don't stall.
+            let new_vx = if new_vx.abs() < 0.12 { 0.18 * new_vx.signum() } else { new_vx };
+            let new_vy = if new_vy.abs() < 0.12 { 0.18 * new_vy.signum() } else { new_vy };
+
+            // Check whether the new direction is different from the old one.
+            let old_dir = velocity_to_dir(self.vel_x, self.vel_y);
+            let new_dir = velocity_to_dir(new_vx, new_vy);
+            if new_dir != old_dir {
+                // Pause for 1–2 seconds (20–40 ticks at 50ms each).
+                self.pause_ticks = rng.gen_range(20_u32..40);
             }
+
+            self.vel_x = new_vx;
+            self.vel_y = new_vy;
+
+            // Hold this direction for 2–8 seconds (40–160 ticks).
+            self.dir_hold_ticks = rng.gen_range(40_u32..160);
+        } else {
+            self.dir_hold_ticks -= 1;
+        }
+
+        // ── Position update (only when in Idle animation) ────────────────────
+        if !is_moving {
+            return; // Eating/sleeping: timers tick but position is frozen.
         }
 
         self.pos_x += self.vel_x;
         self.pos_y += self.vel_y;
 
-        // Bounce off pen walls
+        // Bounce off pen walls.
         let max_x = (pen_w as f32 - sprite_w as f32).max(0.0);
-        let max_y = (pen_h as f32 - sprite_h as f32 - 1.0).max(0.0); // -1 for label row
+        let max_y = (pen_h as f32 - sprite_h as f32 - 1.0).max(0.0);
 
-        if self.pos_x < 0.0 {
-            self.pos_x = 0.0;
-            self.vel_x = self.vel_x.abs();
-        }
-        if self.pos_x > max_x {
-            self.pos_x = max_x;
-            self.vel_x = -self.vel_x.abs();
-        }
-        if self.pos_y < 0.0 {
-            self.pos_y = 0.0;
-            self.vel_y = self.vel_y.abs();
-        }
-        if self.pos_y > max_y {
-            self.pos_y = max_y;
-            self.vel_y = -self.vel_y.abs();
-        }
+        if self.pos_x < 0.0       { self.pos_x = 0.0;   self.vel_x =  self.vel_x.abs(); }
+        if self.pos_x > max_x     { self.pos_x = max_x;  self.vel_x = -self.vel_x.abs(); }
+        if self.pos_y < 0.0       { self.pos_y = 0.0;   self.vel_y =  self.vel_y.abs(); }
+        if self.pos_y > max_y     { self.pos_y = max_y;  self.vel_y = -self.vel_y.abs(); }
     }
 }
 
@@ -976,7 +1004,7 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
     // Sprite size: same column-width logic as before, but now position-independent.
     // sprite_h reserves 1 row at the bottom for the name label.
     let sprite_w = pen_inner.width / MAX_SLOTS as u16;
-    let sprite_h = pen_inner.height.saturating_sub(1);
+    let sprite_h = pen_inner.height; // full height — label is beside, not below
 
     // Size rect used for protocol encoding (position 0,0 — decoupled from render pos).
     let size_rect = Rect::new(0, 0, sprite_w, sprite_h);
@@ -993,18 +1021,22 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
             let max_py = (pen_inner.height.saturating_sub(sprite_h + 1)) as f32;
             slot.pos_x = rng.gen_range(0.0..=max_px.max(0.0));
             slot.pos_y = rng.gen_range(0.0..=max_py.max(0.0));
-            slot.vel_x = rng.gen_range(-0.3..=0.3_f32);
-            slot.vel_y = rng.gen_range(-0.2..=0.2_f32);
-            if slot.vel_x.abs() < 0.05 {
-                slot.vel_x = 0.15;
-            }
+            slot.vel_x = rng.gen_range(-0.4..=0.4_f32);
+            slot.vel_y = rng.gen_range(-0.4..=0.4_f32);
+            if slot.vel_x.abs() < 0.12 { slot.vel_x = if slot.vel_x >= 0.0 { 0.18 } else { -0.18 }; }
+            if slot.vel_y.abs() < 0.12 { slot.vel_y = if slot.vel_y >= 0.0 { 0.18 } else { -0.18 }; }
+            slot.dir_hold_ticks = rng.gen_range(40_u32..160);
         }
 
-        // Update position for this tick.
-        slot.update_position(pen_inner.width, pen_inner.height, sprite_w, sprite_h);
+        // Update position for this tick (frozen during eating/sleeping).
+        let is_moving = matches!(slot.animator.state(), AnimationState::Idle);
+        slot.update_position(pen_inner.width, pen_inner.height, sprite_w, sprite_h, is_moving);
 
-        // Compute facing direction from velocity.
-        slot.current_dir = velocity_to_dir(slot.vel_x, slot.vel_y);
+        // Only update direction when actually moving and not mid-pause.
+        if is_moving && slot.pause_ticks == 0 {
+            slot.current_dir = velocity_to_dir(slot.vel_x, slot.vel_y);
+        }
+        // (else keep existing current_dir — face the last direction)
 
         // Lazily encode (or re-encode on resize) — compare size only, not position.
         if slot.encoded_rect != Some(size_rect) {
@@ -1048,26 +1080,53 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
             ),
         }
 
-        // Name label — follows sprite, rendered one row below it.
-        let label_y = render_y + sprite_h;
-        let label_in_bounds = label_y < pen_inner.y + pen_inner.height;
-        if label_in_bounds {
-            let state_icon = match slot.animator.state() {
-                AnimationState::Idle => "",
-                AnimationState::Eating => " 🍖",
-                AnimationState::Sleeping => " 💤",
-            };
+        // ── GB-style side label ──────────────────────────────────────────────
+        // Two rows of text beside the sprite. Try right, then left, then skip.
+        let label_w = sprite_w.max(8); // at least 8 cells wide
+        let label_h = 2u16;
+
+        // Try to place label to the right of sprite.
+        let right_x = render_x + sprite_w;
+        let can_fit_right = right_x + label_w <= pen_inner.x + pen_inner.width;
+
+        // Try to place label to the left.
+        let can_fit_left = render_x >= pen_inner.x + label_w;
+
+        let label_x = if can_fit_right {
+            right_x
+        } else if can_fit_left {
+            render_x - label_w
+        } else {
+            // No room either side — skip label this frame.
+            continue;
+        };
+
+        // Vertically align label to top of sprite.
+        let label_y = render_y;
+
+        if label_y + label_h <= pen_inner.y + pen_inner.height {
             let is_selected = selected == i;
-            let (name_color, prefix) = if is_selected {
-                (Color::Yellow, "▲ ")
-            } else {
-                (Color::DarkGray, "  ")
+            let chevron = if is_selected { "▶ " } else { "  " };
+            let name_color = if is_selected { Color::Yellow } else { Color::White };
+
+            let name_line = format!("{}{}", chevron, slot.creature_name.to_uppercase());
+            let state_icon = match slot.animator.state() {
+                AnimationState::Idle     => "  ",
+                AnimationState::Eating   => "🍖",
+                AnimationState::Sleeping => "💤",
             };
-            let label = format!("{}{}{}", prefix, slot.creature_name, state_icon);
-            let label_rect = Rect::new(render_x, label_y, sprite_w, 1);
+            let level_line = format!("  Lv.1 {}", state_icon);
+
+            let label_rect_row0 = Rect::new(label_x, label_y,     label_w, 1);
+            let label_rect_row1 = Rect::new(label_x, label_y + 1, label_w, 1);
+
             f.render_widget(
-                Paragraph::new(label).style(Style::default().fg(name_color)),
-                label_rect,
+                Paragraph::new(name_line).style(Style::default().fg(name_color)),
+                label_rect_row0,
+            );
+            f.render_widget(
+                Paragraph::new(level_line).style(Style::default().fg(Color::Green)),
+                label_rect_row1,
             );
         }
     }
