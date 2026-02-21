@@ -72,6 +72,13 @@ const MAX_CACHED_FRAMES: usize = 8;
 /// shifts existing columns (which would invalidate all encoded Protocols).
 const MAX_SLOTS: usize = 6;
 
+/// Fixed sprite render size in terminal cells. All sprites are this size
+/// regardless of pen dimensions. 32×32 gives a clear, consistent look.
+const SPRITE_W: u16 = 32;
+const SPRITE_H: u16 = 10;  // was 16 — tighter area, label sits close to sprite
+
+const LABEL_H: u16 = 4; // 1 top border + 2 content rows + 1 bottom border
+
 // ── Notification system ────────────────────────────────────────────────────────
 
 /// Maximum number of notifications to keep in the deque at once.
@@ -133,6 +140,12 @@ struct CreatureSlot {
     pub vel_y: f32,
     /// Current direction index: 0=Down, 1=Left, 2=Up, 3=Right.
     pub current_dir: usize,
+    /// Ticks remaining holding the current direction before picking a new one.
+    /// When it hits 0, pick a new velocity and reset to a random 2-8 second hold.
+    pub dir_hold_ticks: u32,
+    /// Ticks remaining in a direction-change pause (standing idle before walking).
+    /// While > 0, position does NOT update. Reset to 0 when walking resumes.
+    pub pause_ticks: u32,
 }
 
 impl CreatureSlot {
@@ -151,54 +164,79 @@ impl CreatureSlot {
             vel_x: 0.0,
             vel_y: 0.0,
             current_dir: 0,
+            dir_hold_ticks: 0,
+            pause_ticks: 0,
         }
     }
 
-    /// Update this creature's position and velocity for one 50ms tick.
+    /// Update position and movement timers for one 50ms tick.
     ///
-    /// Applies occasional random velocity perturbations for organic wandering,
-    /// then bounces off the pen walls. Creatures may overlap — collision
-    /// detection is a future TODO.
-    pub fn update_position(&mut self, pen_w: u16, pen_h: u16, sprite_w: u16, sprite_h: u16) {
+    /// `is_moving` should be `true` only when the creature is in the Idle animation
+    /// state. Eating/sleeping creatures have timers ticked but position frozen.
+    pub fn update_position(
+        &mut self,
+        pen_w: u16,
+        pen_h: u16,
+        sprite_w: u16,
+        sprite_h: u16,
+        is_moving: bool,
+    ) {
         use rand::Rng;
         let mut rng = rand::thread_rng();
 
-        // Occasionally perturb velocity (roughly every 3 seconds = 60 ticks at 50ms)
-        if rng.r#gen::<f32>() < 0.017 {
-            self.vel_x += rng.gen_range(-0.15..0.15);
-            self.vel_y += rng.gen_range(-0.15..0.15);
-            // Clamp velocity to keep creatures moving at a reasonable pace
-            self.vel_x = self.vel_x.clamp(-0.4, 0.4);
-            self.vel_y = self.vel_y.clamp(-0.3, 0.3);
-            // Ensure minimum speed so they don't stop
-            if self.vel_x.abs() < 0.05 {
-                self.vel_x = if self.vel_x >= 0.0 { 0.1 } else { -0.1 };
+        // ── Direction-change pause ───────────────────────────────────────────
+        // Creature stands still briefly when switching direction.
+        if self.pause_ticks > 0 {
+            self.pause_ticks -= 1;
+            return; // Frozen in place — no movement or timer updates this tick.
+        }
+
+        // ── Direction hold timer ─────────────────────────────────────────────
+        // When the hold timer hits 0, pick a new direction.
+        if self.dir_hold_ticks == 0 {
+            let new_vx = rng.gen_range(-0.4_f32..=0.4);
+            let new_vy = rng.gen_range(-0.4_f32..=0.4);
+
+            // Apply minimum speed so creatures don't stall.
+            let new_vx = if new_vx.abs() < 0.12 { 0.18 * new_vx.signum() } else { new_vx };
+            let new_vy = if new_vy.abs() < 0.12 { 0.18 * new_vy.signum() } else { new_vy };
+
+            // Check whether the new direction is different from the old one.
+            let old_dir = velocity_to_dir(self.vel_x, self.vel_y);
+            let new_dir = velocity_to_dir(new_vx, new_vy);
+            if new_dir != old_dir {
+                // Pause for 1–2 seconds (20–40 ticks at 50ms each).
+                self.pause_ticks = rng.gen_range(20_u32..40);
             }
+
+            self.vel_x = new_vx;
+            self.vel_y = new_vy;
+
+            // Lock direction for the entire heading — only update here, never from live velocity.
+            self.current_dir = velocity_to_dir(new_vx, new_vy);
+
+            // Hold this direction for 2–8 seconds (40–160 ticks).
+            self.dir_hold_ticks = rng.gen_range(40_u32..160);
+        } else {
+            self.dir_hold_ticks -= 1;
+        }
+
+        // ── Position update (only when in Idle animation) ────────────────────
+        if !is_moving {
+            return; // Eating/sleeping: timers tick but position is frozen.
         }
 
         self.pos_x += self.vel_x;
         self.pos_y += self.vel_y;
 
-        // Bounce off pen walls
+        // Bounce off pen walls.
         let max_x = (pen_w as f32 - sprite_w as f32).max(0.0);
-        let max_y = (pen_h as f32 - sprite_h as f32 - 1.0).max(0.0); // -1 for label row
+        let max_y = (pen_h as f32 - sprite_h as f32 - LABEL_H as f32).max(0.0);
 
-        if self.pos_x < 0.0 {
-            self.pos_x = 0.0;
-            self.vel_x = self.vel_x.abs();
-        }
-        if self.pos_x > max_x {
-            self.pos_x = max_x;
-            self.vel_x = -self.vel_x.abs();
-        }
-        if self.pos_y < 0.0 {
-            self.pos_y = 0.0;
-            self.vel_y = self.vel_y.abs();
-        }
-        if self.pos_y > max_y {
-            self.pos_y = max_y;
-            self.vel_y = -self.vel_y.abs();
-        }
+        if self.pos_x < 0.0       { self.pos_x = 0.0;   self.vel_x =  self.vel_x.abs(); }
+        if self.pos_x > max_x     { self.pos_x = max_x;  self.vel_x = -self.vel_x.abs(); }
+        if self.pos_y < 0.0       { self.pos_y = 0.0;   self.vel_y =  self.vel_y.abs(); }
+        if self.pos_y > max_y     { self.pos_y = max_y;  self.vel_y = -self.vel_y.abs(); }
     }
 }
 
@@ -745,7 +783,7 @@ fn resolve_collisions(slots: &mut Vec<CreatureSlot>, sprite_w: u16, sprite_h: u1
 
     // Re-clamp positions to pen bounds after collision resolution
     let max_x = (pen_w as f32 - sprite_w as f32).max(0.0);
-    let max_y = (pen_h as f32 - sprite_h as f32 - 1.0).max(0.0);
+    let max_y = (pen_h as f32 - sprite_h as f32 - LABEL_H as f32).max(0.0);
     for slot in slots.iter_mut() {
         slot.pos_x = slot.pos_x.clamp(0.0, max_x);
         slot.pos_y = slot.pos_y.clamp(0.0, max_y);
@@ -973,13 +1011,12 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
 
     let selected = app.selected;
 
-    // Sprite size: same column-width logic as before, but now position-independent.
-    // sprite_h reserves 1 row at the bottom for the name label.
-    let sprite_w = pen_inner.width / MAX_SLOTS as u16;
-    let sprite_h = pen_inner.height.saturating_sub(1);
+    // Sprite size: fixed constants — same for all creatures regardless of pen dimensions.
+    let sprite_w = SPRITE_W;
+    let sprite_h = SPRITE_H;
 
     // Size rect used for protocol encoding (position 0,0 — decoupled from render pos).
-    let size_rect = Rect::new(0, 0, sprite_w, sprite_h);
+    let size_rect = Rect::new(0, 0, SPRITE_W, SPRITE_H);
 
     // Phase 1: initialize positions, update movement, and set direction for all slots.
     for i in 0..count {
@@ -990,21 +1027,26 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
             use rand::Rng;
             let mut rng = rand::thread_rng();
             let max_px = (pen_inner.width.saturating_sub(sprite_w)) as f32;
-            let max_py = (pen_inner.height.saturating_sub(sprite_h + 1)) as f32;
+            let max_py = (pen_inner.height.saturating_sub(sprite_h + LABEL_H)) as f32;
             slot.pos_x = rng.gen_range(0.0..=max_px.max(0.0));
-            slot.pos_y = rng.gen_range(0.0..=max_py.max(0.0));
-            slot.vel_x = rng.gen_range(-0.3..=0.3_f32);
-            slot.vel_y = rng.gen_range(-0.2..=0.2_f32);
-            if slot.vel_x.abs() < 0.05 {
-                slot.vel_x = 0.15;
-            }
+            // Staggered vertical start: divide pen height into count slots.
+            // Each creature gets its own slot so they start spread out vertically.
+            let y_step = if count > 1 { max_py / (count - 1) as f32 } else { 0.0 };
+            let base_y = i as f32 * y_step;
+            // Small random jitter (±20% of step) so they don't look rigidly spaced.
+            let jitter = rng.gen_range(-y_step * 0.2..=y_step * 0.2_f32);
+            slot.pos_y = (base_y + jitter).clamp(0.0, max_py.max(0.0));
+            slot.vel_x = rng.gen_range(-0.4..=0.4_f32);
+            slot.vel_y = rng.gen_range(-0.4..=0.4_f32);
+            if slot.vel_x.abs() < 0.12 { slot.vel_x = if slot.vel_x >= 0.0 { 0.18 } else { -0.18 }; }
+            if slot.vel_y.abs() < 0.12 { slot.vel_y = if slot.vel_y >= 0.0 { 0.18 } else { -0.18 }; }
+            slot.dir_hold_ticks = rng.gen_range(40_u32..160);
         }
 
-        // Update position for this tick.
-        slot.update_position(pen_inner.width, pen_inner.height, sprite_w, sprite_h);
-
-        // Compute facing direction from velocity.
-        slot.current_dir = velocity_to_dir(slot.vel_x, slot.vel_y);
+        // Update position for this tick (frozen during eating/sleeping).
+        // Direction is locked inside update_position when a new heading is picked.
+        let is_moving = matches!(slot.animator.state(), AnimationState::Idle);
+        slot.update_position(pen_inner.width, pen_inner.height, sprite_w, sprite_h, is_moving);
 
         // Lazily encode (or re-encode on resize) — compare size only, not position.
         if slot.encoded_rect != Some(size_rect) {
@@ -1013,29 +1055,74 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
     }
 
     // Phase 2: resolve creature-to-creature collisions (elastic bounce).
-    resolve_collisions(&mut app.slots, sprite_w, sprite_h, pen_inner.width, pen_inner.height);
+    resolve_collisions(&mut app.slots, SPRITE_W, SPRITE_H, pen_inner.width, pen_inner.height);
 
-    // Phase 3: render each slot at its final position.
+    // ── Phase 3a: render all labels first (lowest visual priority) ──────────────
+    // Sprites render after labels so sprite pixels always overwrite label text
+    // when they happen to overlap in terminal cell space.
+    for i in 0..count {
+        let slot = &app.slots[i];
+
+        let render_x = (pen_inner.x + slot.pos_x.round() as u16)
+            .min(pen_inner.x + pen_inner.width.saturating_sub(sprite_w));
+        let render_y = (pen_inner.y + slot.pos_y.round() as u16)
+            .min(pen_inner.y + pen_inner.height.saturating_sub(sprite_h + LABEL_H));
+
+        let label_x = render_x;
+        let label_y = render_y + sprite_h;
+
+        if label_y + LABEL_H <= pen_inner.y + pen_inner.height {
+            let label_area = Rect::new(label_x, label_y, sprite_w, LABEL_H);
+            let block = Block::default().borders(Borders::ALL);
+            let inner = block.inner(label_area);
+            f.render_widget(block, label_area);
+
+            let is_selected = selected == i;
+            let pokeball = if is_selected { "◉ " } else { "  " };
+            let name_str = format!("{}{}", pokeball, slot.creature_name.to_uppercase());
+            let name_color = if is_selected { Color::Yellow } else { Color::White };
+
+            let state_icon = match slot.animator.state() {
+                AnimationState::Idle     => "",
+                AnimationState::Eating   => " 🍖",
+                AnimationState::Sleeping => " 💤",
+            };
+            let level_str = format!("  Lv.1{}", state_icon);
+
+            let row1 = Rect::new(inner.x, inner.y,     inner.width, 1);
+            let row2 = Rect::new(inner.x, inner.y + 1, inner.width, 1);
+
+            f.render_widget(
+                Paragraph::new(name_str).style(Style::default().fg(name_color)),
+                row1,
+            );
+            f.render_widget(
+                Paragraph::new(level_str).style(Style::default().fg(Color::DarkGray)),
+                row2,
+            );
+        }
+    }
+
+    // ── Phase 3b: render all sprites last (highest visual priority) ──────────────
+    // Written after labels so sprite pixels always appear on top.
     for i in 0..count {
         let slot = &mut app.slots[i];
 
         let state = slot.animator.state();
         let frame_idx = slot.animator.current_frame_index().unwrap_or(0);
         let state_idx = match state {
-            AnimationState::Idle => 0,
-            AnimationState::Eating => 1,
+            AnimationState::Idle     => 0,
+            AnimationState::Eating   => 1,
             AnimationState::Sleeping => 2,
         };
         let dir_idx = slot.current_dir;
 
-        // Build render rect from creature's current position.
         let render_x = (pen_inner.x + slot.pos_x.round() as u16)
             .min(pen_inner.x + pen_inner.width.saturating_sub(sprite_w));
         let render_y = (pen_inner.y + slot.pos_y.round() as u16)
-            .min(pen_inner.y + pen_inner.height.saturating_sub(sprite_h + 1));
+            .min(pen_inner.y + pen_inner.height.saturating_sub(sprite_h + LABEL_H));
         let img_area = Rect::new(render_x, render_y, sprite_w, sprite_h);
 
-        // Render sprite (or "Loading…" fallback).
         match slot.encoded_frames[state_idx]
             .get_mut(dir_idx)
             .and_then(|dir_frames| dir_frames.get_mut(frame_idx))
@@ -1046,29 +1133,6 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
                 Paragraph::new("Loading…").style(Style::default().fg(Color::DarkGray)),
                 img_area,
             ),
-        }
-
-        // Name label — follows sprite, rendered one row below it.
-        let label_y = render_y + sprite_h;
-        let label_in_bounds = label_y < pen_inner.y + pen_inner.height;
-        if label_in_bounds {
-            let state_icon = match slot.animator.state() {
-                AnimationState::Idle => "",
-                AnimationState::Eating => " 🍖",
-                AnimationState::Sleeping => " 💤",
-            };
-            let is_selected = selected == i;
-            let (name_color, prefix) = if is_selected {
-                (Color::Yellow, "▲ ")
-            } else {
-                (Color::DarkGray, "  ")
-            };
-            let label = format!("{}{}{}", prefix, slot.creature_name, state_icon);
-            let label_rect = Rect::new(render_x, label_y, sprite_w, 1);
-            f.render_widget(
-                Paragraph::new(label).style(Style::default().fg(name_color)),
-                label_rect,
-            );
         }
     }
 }
