@@ -75,7 +75,7 @@ const MAX_SLOTS: usize = 6;
 /// Fixed sprite render size in terminal cells. All sprites are this size
 /// regardless of pen dimensions. 32×32 gives a clear, consistent look.
 const SPRITE_W: u16 = 32;
-const SPRITE_H: u16 = 16; // 16 rows ≈ 32 cols visually square (cells are ~2:1 h:w ratio)
+const SPRITE_H: u16 = 10;  // was 16 — tighter area, label sits close to sprite
 
 const LABEL_H: u16 = 4; // 1 top border + 2 content rows + 1 bottom border
 
@@ -1057,63 +1057,34 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
     // Phase 2: resolve creature-to-creature collisions (elastic bounce).
     resolve_collisions(&mut app.slots, SPRITE_W, SPRITE_H, pen_inner.width, pen_inner.height);
 
-    // Phase 3: render each slot at its final position.
+    // ── Phase 3a: render all labels first (lowest visual priority) ──────────────
+    // Sprites render after labels so sprite pixels always overwrite label text
+    // when they happen to overlap in terminal cell space.
     for i in 0..count {
-        let slot = &mut app.slots[i];
+        let slot = &app.slots[i];
 
-        let state = slot.animator.state();
-        let frame_idx = slot.animator.current_frame_index().unwrap_or(0);
-        let state_idx = match state {
-            AnimationState::Idle => 0,
-            AnimationState::Eating => 1,
-            AnimationState::Sleeping => 2,
-        };
-        let dir_idx = slot.current_dir;
-
-        // Build render rect from creature's current position.
         let render_x = (pen_inner.x + slot.pos_x.round() as u16)
             .min(pen_inner.x + pen_inner.width.saturating_sub(sprite_w));
         let render_y = (pen_inner.y + slot.pos_y.round() as u16)
             .min(pen_inner.y + pen_inner.height.saturating_sub(sprite_h + LABEL_H));
-        let img_area = Rect::new(render_x, render_y, sprite_w, sprite_h);
 
-        // Render sprite (or "Loading…" fallback).
-        match slot.encoded_frames[state_idx]
-            .get_mut(dir_idx)
-            .and_then(|dir_frames| dir_frames.get_mut(frame_idx))
-            .and_then(|opt| opt.as_mut())
-        {
-            Some(protocol) => f.render_widget(Image::new(protocol), img_area),
-            None => f.render_widget(
-                Paragraph::new("Loading…").style(Style::default().fg(Color::DarkGray)),
-                img_area,
-            ),
-        }
-
-        // ── Static label below sprite ─────────────────────────────────────────────
-        // The label is always directly below the sprite. It has the same width
-        // and a bounding box matching the rest of the TUI style.
         let label_x = render_x;
         let label_y = render_y + sprite_h;
 
         if label_y + LABEL_H <= pen_inner.y + pen_inner.height {
             let label_area = Rect::new(label_x, label_y, sprite_w, LABEL_H);
-
-            // Bounding box — same style as the pen and other TUI panels.
             let block = Block::default().borders(Borders::ALL);
             let inner = block.inner(label_area);
             f.render_widget(block, label_area);
 
-            // Row 1: pokéball indicator + name in uppercase.
             let is_selected = selected == i;
             let pokeball = if is_selected { "◉ " } else { "  " };
             let name_str = format!("{}{}", pokeball, slot.creature_name.to_uppercase());
             let name_color = if is_selected { Color::Yellow } else { Color::White };
 
-            // Row 2: level + state icon.
             let state_icon = match slot.animator.state() {
-                AnimationState::Idle    => "",
-                AnimationState::Eating  => " 🍖",
+                AnimationState::Idle     => "",
+                AnimationState::Eating   => " 🍖",
                 AnimationState::Sleeping => " 💤",
             };
             let level_str = format!("  Lv.1{}", state_icon);
@@ -1129,6 +1100,39 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
                 Paragraph::new(level_str).style(Style::default().fg(Color::DarkGray)),
                 row2,
             );
+        }
+    }
+
+    // ── Phase 3b: render all sprites last (highest visual priority) ──────────────
+    // Written after labels so sprite pixels always appear on top.
+    for i in 0..count {
+        let slot = &mut app.slots[i];
+
+        let state = slot.animator.state();
+        let frame_idx = slot.animator.current_frame_index().unwrap_or(0);
+        let state_idx = match state {
+            AnimationState::Idle     => 0,
+            AnimationState::Eating   => 1,
+            AnimationState::Sleeping => 2,
+        };
+        let dir_idx = slot.current_dir;
+
+        let render_x = (pen_inner.x + slot.pos_x.round() as u16)
+            .min(pen_inner.x + pen_inner.width.saturating_sub(sprite_w));
+        let render_y = (pen_inner.y + slot.pos_y.round() as u16)
+            .min(pen_inner.y + pen_inner.height.saturating_sub(sprite_h + LABEL_H));
+        let img_area = Rect::new(render_x, render_y, sprite_w, sprite_h);
+
+        match slot.encoded_frames[state_idx]
+            .get_mut(dir_idx)
+            .and_then(|dir_frames| dir_frames.get_mut(frame_idx))
+            .and_then(|opt| opt.as_mut())
+        {
+            Some(protocol) => f.render_widget(Image::new(protocol), img_area),
+            None => f.render_widget(
+                Paragraph::new("Loading…").style(Style::default().fg(Color::DarkGray)),
+                img_area,
+            ),
         }
     }
 }
