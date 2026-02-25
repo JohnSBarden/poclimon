@@ -82,6 +82,7 @@ const SPRITE_W: u16 = 32;
 const SPRITE_H: u16 = 10; // was 16 — tighter area, label sits close to sprite
 
 const LABEL_H: u16 = 1; // single compact line below sprite
+const COLLISION_MIN_PENETRATION: f32 = 0.75;
 
 /// Optional debug log sink enabled by `POCLIMON_DEBUG_LOG=/path/to/file`.
 /// Logs are append-only and intentionally low-level for render/movement triage.
@@ -179,6 +180,9 @@ struct CreatureSlot {
     /// Whether to face Down while paused between direction changes.
     /// Enabled with a small probability to make idle stances feel less rigid.
     pub pause_face_down: bool,
+    /// Cooldown (ticks) before accepting another velocity-driven facing change.
+    /// Reduces rapid direction jitter when collisions/walls cause tiny flips.
+    pub dir_cooldown_ticks: u8,
 }
 
 impl CreatureSlot {
@@ -200,6 +204,7 @@ impl CreatureSlot {
             dir_hold_ticks: 0,
             pause_ticks: 0,
             pause_face_down: false,
+            dir_cooldown_ticks: 0,
         }
     }
 
@@ -220,11 +225,15 @@ impl CreatureSlot {
 
         // ── Direction-change pause ───────────────────────────────────────────
         // Creature stands still briefly when switching direction.
+        if self.dir_cooldown_ticks > 0 {
+            self.dir_cooldown_ticks -= 1;
+        }
         if self.pause_ticks > 0 {
             self.pause_ticks -= 1;
             if self.pause_ticks == 0 {
                 // Resume movement facing the heading we'll actually move in.
                 self.current_dir = velocity_to_dir(self.vel_x, self.vel_y);
+                self.dir_cooldown_ticks = 3;
                 self.pause_face_down = false;
                 debug_log(format!(
                     "pause_end id={} dir={} vx={:.3} vy={:.3}",
@@ -285,6 +294,7 @@ impl CreatureSlot {
             // Lock direction for the entire heading — only update here, never from live velocity.
             if self.pause_ticks == 0 {
                 self.current_dir = velocity_to_dir(new_vx, new_vy);
+                self.dir_cooldown_ticks = 3;
                 debug_log(format!(
                     "heading_apply id={} dir={} vx={:.3} vy={:.3}",
                     self.creature_id, self.current_dir, self.vel_x, self.vel_y
@@ -312,46 +322,34 @@ impl CreatureSlot {
         if self.pos_x < 0.0 {
             self.pos_x = 0.0;
             self.vel_x = self.vel_x.abs();
-            if self.pause_ticks == 0 {
-                self.current_dir = velocity_to_dir(self.vel_x, self.vel_y);
-                debug_log(format!(
-                    "wall_bounce id={} axis=x dir={} vx={:.3} vy={:.3}",
-                    self.creature_id, self.current_dir, self.vel_x, self.vel_y
-                ));
-            }
+            debug_log(format!(
+                "wall_bounce id={} axis=x dir={} vx={:.3} vy={:.3}",
+                self.creature_id, self.current_dir, self.vel_x, self.vel_y
+            ));
         }
         if self.pos_x > max_x {
             self.pos_x = max_x;
             self.vel_x = -self.vel_x.abs();
-            if self.pause_ticks == 0 {
-                self.current_dir = velocity_to_dir(self.vel_x, self.vel_y);
-                debug_log(format!(
-                    "wall_bounce id={} axis=x dir={} vx={:.3} vy={:.3}",
-                    self.creature_id, self.current_dir, self.vel_x, self.vel_y
-                ));
-            }
+            debug_log(format!(
+                "wall_bounce id={} axis=x dir={} vx={:.3} vy={:.3}",
+                self.creature_id, self.current_dir, self.vel_x, self.vel_y
+            ));
         }
         if self.pos_y < 0.0 {
             self.pos_y = 0.0;
             self.vel_y = self.vel_y.abs();
-            if self.pause_ticks == 0 {
-                self.current_dir = velocity_to_dir(self.vel_x, self.vel_y);
-                debug_log(format!(
-                    "wall_bounce id={} axis=y dir={} vx={:.3} vy={:.3}",
-                    self.creature_id, self.current_dir, self.vel_x, self.vel_y
-                ));
-            }
+            debug_log(format!(
+                "wall_bounce id={} axis=y dir={} vx={:.3} vy={:.3}",
+                self.creature_id, self.current_dir, self.vel_x, self.vel_y
+            ));
         }
         if self.pos_y > max_y {
             self.pos_y = max_y;
             self.vel_y = -self.vel_y.abs();
-            if self.pause_ticks == 0 {
-                self.current_dir = velocity_to_dir(self.vel_x, self.vel_y);
-                debug_log(format!(
-                    "wall_bounce id={} axis=y dir={} vx={:.3} vy={:.3}",
-                    self.creature_id, self.current_dir, self.vel_x, self.vel_y
-                ));
-            }
+            debug_log(format!(
+                "wall_bounce id={} axis=y dir={} vx={:.3} vy={:.3}",
+                self.creature_id, self.current_dir, self.vel_x, self.vel_y
+            ));
         }
     }
 }
@@ -956,6 +954,13 @@ fn resolve_collisions(
             if overlap_x <= 0.0 || overlap_y <= 0.0 {
                 continue;
             }
+            if overlap_x.min(overlap_y) < COLLISION_MIN_PENETRATION {
+                debug_log(format!(
+                    "collision_skip_shallow i={} j={} ox={:.2} oy={:.2}",
+                    slots[i].creature_id, slots[j].creature_id, overlap_x, overlap_y
+                ));
+                continue;
+            }
 
             // Resolve along the axis of least penetration to prevent deep overlap.
             if overlap_x <= overlap_y {
@@ -1002,12 +1007,6 @@ fn resolve_collisions(
                 }
             }
 
-            if slots[i].pause_ticks == 0 {
-                slots[i].current_dir = velocity_to_dir(slots[i].vel_x, slots[i].vel_y);
-            }
-            if slots[j].pause_ticks == 0 {
-                slots[j].current_dir = velocity_to_dir(slots[j].vel_x, slots[j].vel_y);
-            }
             debug_log(format!(
                 "collision i={} j={} ox={:.2} oy={:.2} dir_i={} dir_j={} vix={:.3} viy={:.3} vjx={:.3} vjy={:.3}",
                 slots[i].creature_id,
@@ -1069,6 +1068,28 @@ fn pick_protocol_index(
         }
     }
     None
+}
+
+fn maybe_update_facing_from_velocity(slot: &mut CreatureSlot) {
+    if !matches!(slot.animator.state(), AnimationState::Idle) || slot.pause_ticks > 0 {
+        return;
+    }
+    if slot.dir_cooldown_ticks > 0 {
+        return;
+    }
+    let speed_sq = slot.vel_x * slot.vel_x + slot.vel_y * slot.vel_y;
+    if speed_sq < 0.02 {
+        return;
+    }
+    let new_dir = velocity_to_dir(slot.vel_x, slot.vel_y);
+    if new_dir != slot.current_dir {
+        slot.current_dir = new_dir;
+        slot.dir_cooldown_ticks = 3;
+        debug_log(format!(
+            "facing_update id={} dir={} vx={:.3} vy={:.3}",
+            slot.creature_id, slot.current_dir, slot.vel_x, slot.vel_y
+        ));
+    }
 }
 
 // ── Application entry point ────────────────────────────────────────────────────
@@ -1364,6 +1385,10 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
         pen_inner.width,
         pen_inner.height,
     );
+
+    for slot in &mut app.slots {
+        maybe_update_facing_from_velocity(slot);
+    }
 
     // ── Phase 3a: render all labels first (lowest visual priority) ──────────────
     // Sprites render after labels so sprite pixels always overwrite label text
