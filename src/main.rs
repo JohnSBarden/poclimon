@@ -83,6 +83,7 @@ const SPRITE_H: u16 = 10; // was 16 — tighter area, label sits close to sprite
 
 const LABEL_H: u16 = 1; // single compact line below sprite
 const COLLISION_MIN_PENETRATION: f32 = 0.75;
+const OVERLAP_STACK_THRESHOLD: f32 = 0.60;
 
 /// Optional debug log sink enabled by `POCLIMON_DEBUG_LOG=/path/to/file`.
 /// Logs are append-only and intentionally low-level for render/movement triage.
@@ -955,6 +956,35 @@ fn resolve_collisions(
                 continue;
             }
             if overlap_x.min(overlap_y) < COLLISION_MIN_PENETRATION {
+                // Anti-stacking: when overlap is shallow on one axis but very deep on the other,
+                // nudge apart along the shallow axis so one sprite doesn't visually hide the other.
+                let wide_overlap_x = overlap_x > sprite_wf * OVERLAP_STACK_THRESHOLD;
+                let wide_overlap_y = overlap_y > sprite_hf * OVERLAP_STACK_THRESHOLD;
+                if wide_overlap_x && overlap_y > 0.01 {
+                    let center_i = top_i + sprite_hf / 2.0;
+                    let center_j = top_j + sprite_hf / 2.0;
+                    let j_is_below = center_j >= center_i;
+                    let push = overlap_y / 2.0 + 0.2;
+                    if j_is_below {
+                        slots[i].pos_y -= push;
+                        slots[j].pos_y += push;
+                    } else {
+                        slots[i].pos_y += push;
+                        slots[j].pos_y -= push;
+                    }
+                } else if wide_overlap_y && overlap_x > 0.01 {
+                    let center_i = left_i + sprite_wf / 2.0;
+                    let center_j = left_j + sprite_wf / 2.0;
+                    let j_is_right = center_j >= center_i;
+                    let push = overlap_x / 2.0 + 0.2;
+                    if j_is_right {
+                        slots[i].pos_x -= push;
+                        slots[j].pos_x += push;
+                    } else {
+                        slots[i].pos_x += push;
+                        slots[j].pos_x -= push;
+                    }
+                }
                 debug_log(format!(
                     "collision_skip_shallow i={} j={} ox={:.2} oy={:.2}",
                     slots[i].creature_id, slots[j].creature_id, overlap_x, overlap_y
@@ -1081,7 +1111,18 @@ fn maybe_update_facing_from_velocity(slot: &mut CreatureSlot) {
     if speed_sq < 0.02 {
         return;
     }
-    let new_dir = velocity_to_dir(slot.vel_x, slot.vel_y);
+    // Hysteresis:
+    // - require one axis to dominate before changing
+    // - keep current direction for near-diagonal vectors to avoid rapid flipping
+    let ax = slot.vel_x.abs();
+    let ay = slot.vel_y.abs();
+    let new_dir = if ax >= ay * 1.30 {
+        if slot.vel_x >= 0.0 { 3 } else { 1 }
+    } else if ay >= ax * 1.30 {
+        if slot.vel_y >= 0.0 { 0 } else { 2 }
+    } else {
+        slot.current_dir
+    };
     if new_dir != slot.current_dir {
         slot.current_dir = new_dir;
         slot.dir_cooldown_ticks = 3;
