@@ -81,8 +81,8 @@ const MAX_SLOTS: usize = 6;
 const SPRITE_W: u16 = 32;
 const SPRITE_H: u16 = 10; // was 16 — tighter area, label sits close to sprite
 
-const LABEL_H: u16 = 1; // single compact line below sprite
-const LABEL_OVERLAP: u16 = 1; // pull label 1 row into sprite bottom edge
+const LABEL_H: u16 = 3; // compact bordered plate: top border + 1 row + bottom border
+const LABEL_OVERLAP: u16 = 0; // keep readable by hugging sprite edge, not overlapping pixels
 const COLLISION_MIN_PENETRATION: f32 = 0.75;
 const OVERLAP_STACK_THRESHOLD: f32 = 0.60;
 
@@ -1453,44 +1453,7 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
         maybe_update_facing_from_velocity(slot);
     }
 
-    // ── Phase 3a: render all labels first (lowest visual priority) ──────────────
-    // Sprites render after labels so sprite pixels always overwrite label text
-    // when they happen to overlap in terminal cell space.
-    for i in 0..count {
-        let slot = &app.slots[i];
-
-        let render_x = (pen_inner.x + slot.pos_x.round() as u16)
-            .min(pen_inner.x + pen_inner.width.saturating_sub(sprite_w));
-        let render_y = (pen_inner.y + slot.pos_y.round() as u16)
-            .min(pen_inner.y + pen_inner.height.saturating_sub(sprite_stack_h(sprite_h)));
-
-        let is_selected = selected == i;
-        let selected_prefix = if is_selected { "◉ " } else { "" };
-        let label_text = format!(
-            "{}{} Lv.1",
-            selected_prefix,
-            slot.creature_name.to_uppercase()
-        );
-        let label_w = (label_text.chars().count() as u16).clamp(6, sprite_w);
-        let label_x = render_x + (sprite_w.saturating_sub(label_w) / 2);
-        let label_y = render_y + sprite_h.saturating_sub(LABEL_OVERLAP);
-
-        if label_y + LABEL_H <= pen_inner.y + pen_inner.height {
-            let label_area = Rect::new(label_x, label_y, label_w, LABEL_H);
-            let label_color = if is_selected {
-                Color::Yellow
-            } else {
-                Color::Gray
-            };
-            f.render_widget(
-                Paragraph::new(label_text).style(Style::default().fg(label_color)),
-                label_area,
-            );
-        }
-    }
-
-    // ── Phase 3b: render all sprites last (highest visual priority) ──────────────
-    // Written after labels so sprite pixels always appear on top.
+    // ── Phase 3a: render all sprites ──────────────────────────────────────────────
     for i in 0..count {
         let slot = &mut app.slots[i];
 
@@ -1546,7 +1509,7 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
         }
     }
 
-    // Final label pass on top of sprites so overlap remains readable.
+    // ── Phase 3b: render compact bordered nameplates ──────────────────────────────
     for i in 0..count {
         let slot = &app.slots[i];
 
@@ -1562,20 +1525,26 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
             selected_prefix,
             slot.creature_name.to_uppercase()
         );
-        let label_w = (label_text.chars().count() as u16).clamp(6, sprite_w);
-        let label_x = render_x + (sprite_w.saturating_sub(label_w) / 2);
+        let label_w = (label_text.chars().count() as u16 + 2).clamp(8, sprite_w);
+        let mut label_x = render_x + (sprite_w.saturating_sub(label_w) / 2);
         let label_y = render_y + sprite_h.saturating_sub(LABEL_OVERLAP);
 
         if label_y + LABEL_H <= pen_inner.y + pen_inner.height {
+            let min_x = pen_inner.x;
+            let max_x = pen_inner.x + pen_inner.width.saturating_sub(label_w);
+            label_x = label_x.clamp(min_x, max_x);
             let label_area = Rect::new(label_x, label_y, label_w, LABEL_H);
             let label_color = if is_selected {
                 Color::Yellow
             } else {
                 Color::Gray
             };
+            let block = Block::default().borders(Borders::ALL);
+            let inner = block.inner(label_area);
+            f.render_widget(block, label_area);
             f.render_widget(
                 Paragraph::new(label_text).style(Style::default().fg(label_color)),
-                label_area,
+                Rect::new(inner.x, inner.y, inner.width, 1),
             );
         }
     }
