@@ -1086,9 +1086,10 @@ fn resolve_collisions(
         }
     }
 
-    // Re-clamp positions to pen bounds after collision resolution
+    // Re-clamp positions to pen bounds after collision resolution.
+    // `sprite_h` is the full collision height (sprite + nameplate footprint).
     let max_x = (pen_w as f32 - sprite_w as f32).max(0.0);
-    let max_y = (pen_h as f32 - sprite_h as f32 - LABEL_H as f32 + LABEL_OVERLAP as f32).max(0.0);
+    let max_y = (pen_h as f32 - sprite_h as f32).max(0.0);
     for slot in slots.iter_mut() {
         slot.pos_x = slot.pos_x.clamp(0.0, max_x);
         slot.pos_y = slot.pos_y.clamp(0.0, max_y);
@@ -1444,7 +1445,7 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
     resolve_collisions(
         &mut app.slots,
         SPRITE_W,
-        SPRITE_H,
+        sprite_stack_h(SPRITE_H),
         pen_inner.width,
         pen_inner.height,
     );
@@ -1526,13 +1527,10 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
             slot.creature_name.to_uppercase()
         );
         let label_w = (label_text.chars().count() as u16 + 2).clamp(8, sprite_w);
-        let mut label_x = render_x + (sprite_w.saturating_sub(label_w) / 2);
+        let label_x = render_x + (sprite_w.saturating_sub(label_w) / 2);
         let label_y = render_y + sprite_h.saturating_sub(LABEL_OVERLAP);
 
         if label_y + LABEL_H <= pen_inner.y + pen_inner.height {
-            let min_x = pen_inner.x;
-            let max_x = pen_inner.x + pen_inner.width.saturating_sub(label_w);
-            label_x = label_x.clamp(min_x, max_x);
             let label_area = Rect::new(label_x, label_y, label_w, LABEL_H);
             let label_color = if is_selected {
                 Color::Yellow
