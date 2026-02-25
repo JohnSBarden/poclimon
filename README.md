@@ -2,7 +2,7 @@
 
 **A terminal-based virtual pet — Tamagotchi in your terminal!**
 
-> **v0.0.3** — Shared pen view + memory optimisation (see [Changelog](#changelog))
+> **v0.0.3+ (active dev branch)** — shared pen, directional sprites, compact bordered nameplates, and ongoing collision tuning (see [Changelog](#changelog))
 
 > 📸 *Screenshot coming soon*
 
@@ -12,6 +12,8 @@
 - 🎨 Sprite animations from the PMDCollab SpriteCollab repository
 - 🌿 Shared-pen view — all creatures share one open canvas, no dividing walls
 - 🔄 Multiple creatures displayed simultaneously (up to 6)
+- 🧭 Direction-aware sprite animations with movement-based facing
+- 🏷️ Compact bordered nameplates centered under each sprite
 - 🍖 Feed, sleep, and interact with your creatures
 - ➕ Add, remove, and swap creatures at runtime — no config editing required
 - ⚙️ TOML-based configuration for customizing your starting roster
@@ -93,6 +95,17 @@ poclimon --config ./my-config.toml
 | `1`–`6`    | Select creature by slot number  |
 | `Q` / `Esc` | Quit                           |
 
+## Runtime Debugging
+
+Set `POCLIMON_DEBUG_LOG` to capture movement/collision/render diagnostics while
+running the TUI:
+
+```bash
+POCLIMON_DEBUG_LOG=/tmp/poclimon-debug.log cargo run
+```
+
+This is useful when tuning collision/facing behavior.
+
 ## Configuration
 
 PoCLImon uses a TOML config file. Default location: `~/.poclimon/config.toml`
@@ -122,10 +135,19 @@ The `roster.creatures` array sets the starting roster. You can then use
 
 ## Changelog
 
+### v0.0.3+ (current branch status)
+- Directional sprite facing now follows movement heading with hysteresis to
+  reduce jitter.
+- Nameplates switched to compact bordered plates centered under sprites.
+- Collision footprint currently includes sprite + nameplate stack height.
+- Added runtime debug logging via `POCLIMON_DEBUG_LOG` for collision/render triage.
+- **Known active work:** collision behavior in crowded overlap cases is still
+  being tuned.
+
 ### v0.0.3
 - **Shared pen view** — replaced the bordered-box grid with a single open
   canvas. All creatures share one area; the selected creature is highlighted
-  with a `▲` name label in yellow. No internal dividers.
+  with a selected marker in yellow. No internal dividers.
 - **Memory optimisation** — scale default changed from 6 → 3 (4× less RAM
   per frame). Frame cache capped at 8 frames per animation. `Animation` is
   now timing-only; pixel data lives exclusively in the slot cache (no more
