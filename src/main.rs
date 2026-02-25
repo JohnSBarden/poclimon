@@ -13,17 +13,17 @@ use config::GameConfig;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
+    Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
-    Frame, Terminal,
 };
-use ratatui_image::{picker::Picker, protocol::Protocol, Image, Resize};
+use ratatui_image::{Image, Resize, picker::Picker, protocol::Protocol};
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::path::PathBuf;
@@ -75,9 +75,9 @@ const MAX_SLOTS: usize = 6;
 /// Fixed sprite render size in terminal cells. All sprites are this size
 /// regardless of pen dimensions. 32×32 gives a clear, consistent look.
 const SPRITE_W: u16 = 32;
-const SPRITE_H: u16 = 10;  // was 16 — tighter area, label sits close to sprite
+const SPRITE_H: u16 = 10; // was 16 — tighter area, label sits close to sprite
 
-const LABEL_H: u16 = 4; // 1 top border + 2 content rows + 1 bottom border
+const LABEL_H: u16 = 1; // single compact line below sprite
 
 // ── Notification system ────────────────────────────────────────────────────────
 
@@ -146,6 +146,9 @@ struct CreatureSlot {
     /// Ticks remaining in a direction-change pause (standing idle before walking).
     /// While > 0, position does NOT update. Reset to 0 when walking resumes.
     pub pause_ticks: u32,
+    /// Whether to face Down while paused between direction changes.
+    /// Enabled with a small probability to make idle stances feel less rigid.
+    pub pause_face_down: bool,
 }
 
 impl CreatureSlot {
@@ -166,6 +169,7 @@ impl CreatureSlot {
             current_dir: 0,
             dir_hold_ticks: 0,
             pause_ticks: 0,
+            pause_face_down: false,
         }
     }
 
@@ -188,6 +192,13 @@ impl CreatureSlot {
         // Creature stands still briefly when switching direction.
         if self.pause_ticks > 0 {
             self.pause_ticks -= 1;
+            if self.pause_ticks == 0 {
+                // Resume movement facing the heading we'll actually move in.
+                self.current_dir = velocity_to_dir(self.vel_x, self.vel_y);
+                self.pause_face_down = false;
+            } else if self.pause_face_down {
+                self.current_dir = 0;
+            }
             return; // Frozen in place — no movement or timer updates this tick.
         }
 
@@ -198,8 +209,16 @@ impl CreatureSlot {
             let new_vy = rng.gen_range(-0.4_f32..=0.4);
 
             // Apply minimum speed so creatures don't stall.
-            let new_vx = if new_vx.abs() < 0.12 { 0.18 * new_vx.signum() } else { new_vx };
-            let new_vy = if new_vy.abs() < 0.12 { 0.18 * new_vy.signum() } else { new_vy };
+            let new_vx = if new_vx.abs() < 0.12 {
+                0.18 * new_vx.signum()
+            } else {
+                new_vx
+            };
+            let new_vy = if new_vy.abs() < 0.12 {
+                0.18 * new_vy.signum()
+            } else {
+                new_vy
+            };
 
             // Check whether the new direction is different from the old one.
             let old_dir = velocity_to_dir(self.vel_x, self.vel_y);
@@ -207,13 +226,23 @@ impl CreatureSlot {
             if new_dir != old_dir {
                 // Pause for 1–2 seconds (20–40 ticks at 50ms each).
                 self.pause_ticks = rng.gen_range(20_u32..40);
+                self.pause_face_down = rng.gen_bool(0.30);
+                if self.pause_face_down {
+                    self.current_dir = 0;
+                } else {
+                    self.current_dir = old_dir;
+                }
+            } else {
+                self.pause_face_down = false;
             }
 
             self.vel_x = new_vx;
             self.vel_y = new_vy;
 
             // Lock direction for the entire heading — only update here, never from live velocity.
-            self.current_dir = velocity_to_dir(new_vx, new_vy);
+            if self.pause_ticks == 0 {
+                self.current_dir = velocity_to_dir(new_vx, new_vy);
+            }
 
             // Hold this direction for 2–8 seconds (40–160 ticks).
             self.dir_hold_ticks = rng.gen_range(40_u32..160);
@@ -233,10 +262,22 @@ impl CreatureSlot {
         let max_x = (pen_w as f32 - sprite_w as f32).max(0.0);
         let max_y = (pen_h as f32 - sprite_h as f32 - LABEL_H as f32).max(0.0);
 
-        if self.pos_x < 0.0       { self.pos_x = 0.0;   self.vel_x =  self.vel_x.abs(); }
-        if self.pos_x > max_x     { self.pos_x = max_x;  self.vel_x = -self.vel_x.abs(); }
-        if self.pos_y < 0.0       { self.pos_y = 0.0;   self.vel_y =  self.vel_y.abs(); }
-        if self.pos_y > max_y     { self.pos_y = max_y;  self.vel_y = -self.vel_y.abs(); }
+        if self.pos_x < 0.0 {
+            self.pos_x = 0.0;
+            self.vel_x = self.vel_x.abs();
+        }
+        if self.pos_x > max_x {
+            self.pos_x = max_x;
+            self.vel_x = -self.vel_x.abs();
+        }
+        if self.pos_y < 0.0 {
+            self.pos_y = 0.0;
+            self.vel_y = self.vel_y.abs();
+        }
+        if self.pos_y > max_y {
+            self.pos_y = max_y;
+            self.vel_y = -self.vel_y.abs();
+        }
     }
 }
 
@@ -306,10 +347,7 @@ impl App {
                 }
                 Err(e) => {
                     let name = self.slots[i].creature_name.clone();
-                    self.notify(
-                        NotifLevel::Error,
-                        format!("Failed to load {}: {}", name, e),
-                    );
+                    self.notify(NotifLevel::Error, format!("Failed to load {}: {}", name, e));
                 }
             }
         }
@@ -426,10 +464,7 @@ impl App {
         let current_id = slot.creature_id;
         let roster = creatures::ROSTER;
 
-        let current_pos = roster
-            .iter()
-            .position(|c| c.id == current_id)
-            .unwrap_or(0);
+        let current_pos = roster.iter().position(|c| c.id == current_id).unwrap_or(0);
 
         let next_pos = (current_pos + 1) % roster.len();
         let next = &roster[next_pos];
@@ -509,60 +544,139 @@ fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<String>>
     // Load Idle for all 4 directions — use dir 0 (Down) to establish canonical size.
     let (idle_down, idle_timing, idle_w, idle_h, _) =
         load_and_scale_animation("Idle", &sheets, &anim_infos, scale, None, DIR_ROWS[0])?;
-    let idle_left = load_and_scale_animation("Idle", &sheets, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[1])
-        .map(|r| r.0)
-        .unwrap_or_else(|_| idle_down.clone());
-    let idle_up = load_and_scale_animation("Idle", &sheets, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[2])
-        .map(|r| r.0)
-        .unwrap_or_else(|_| idle_down.clone());
-    let idle_right = load_and_scale_animation("Idle", &sheets, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[3])
-        .map(|r| r.0)
-        .unwrap_or_else(|_| idle_down.clone());
+    let idle_left = load_and_scale_animation(
+        "Idle",
+        &sheets,
+        &anim_infos,
+        scale,
+        Some((idle_w, idle_h)),
+        DIR_ROWS[1],
+    )
+    .map(|r| r.0)
+    .unwrap_or_else(|_| idle_down.clone());
+    let idle_up = load_and_scale_animation(
+        "Idle",
+        &sheets,
+        &anim_infos,
+        scale,
+        Some((idle_w, idle_h)),
+        DIR_ROWS[2],
+    )
+    .map(|r| r.0)
+    .unwrap_or_else(|_| idle_down.clone());
+    let idle_right = load_and_scale_animation(
+        "Idle",
+        &sheets,
+        &anim_infos,
+        scale,
+        Some((idle_w, idle_h)),
+        DIR_ROWS[3],
+    )
+    .map(|r| r.0)
+    .unwrap_or_else(|_| idle_down.clone());
     slot.cached_idle = [idle_down.clone(), idle_left, idle_up, idle_right];
 
     // Try Eat dir 0 first to get fallback status.
-    let (eat_down_raw, eat_timing_raw, _, _, eat_fallback) =
-        load_and_scale_animation("Eat", &sheets, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[0])?;
+    let (eat_down_raw, eat_timing_raw, _, _, eat_fallback) = load_and_scale_animation(
+        "Eat",
+        &sheets,
+        &anim_infos,
+        scale,
+        Some((idle_w, idle_h)),
+        DIR_ROWS[0],
+    )?;
     let (eat_frames_by_dir, eat_timing) = if eat_fallback {
         // Reuse Idle frames for all 4 directions
         (slot.cached_idle.clone(), idle_timing.clone())
     } else {
-        let eat_left = load_and_scale_animation("Eat", &sheets, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[1])
-            .map(|r| r.0)
-            .unwrap_or_else(|_| eat_down_raw.clone());
-        let eat_up = load_and_scale_animation("Eat", &sheets, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[2])
-            .map(|r| r.0)
-            .unwrap_or_else(|_| eat_down_raw.clone());
-        let eat_right = load_and_scale_animation("Eat", &sheets, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[3])
-            .map(|r| r.0)
-            .unwrap_or_else(|_| eat_down_raw.clone());
+        let eat_left = load_and_scale_animation(
+            "Eat",
+            &sheets,
+            &anim_infos,
+            scale,
+            Some((idle_w, idle_h)),
+            DIR_ROWS[1],
+        )
+        .map(|r| r.0)
+        .unwrap_or_else(|_| eat_down_raw.clone());
+        let eat_up = load_and_scale_animation(
+            "Eat",
+            &sheets,
+            &anim_infos,
+            scale,
+            Some((idle_w, idle_h)),
+            DIR_ROWS[2],
+        )
+        .map(|r| r.0)
+        .unwrap_or_else(|_| eat_down_raw.clone());
+        let eat_right = load_and_scale_animation(
+            "Eat",
+            &sheets,
+            &anim_infos,
+            scale,
+            Some((idle_w, idle_h)),
+            DIR_ROWS[3],
+        )
+        .map(|r| r.0)
+        .unwrap_or_else(|_| eat_down_raw.clone());
         ([eat_down_raw, eat_left, eat_up, eat_right], eat_timing_raw)
     };
     slot.cached_eat = eat_frames_by_dir;
 
     // Try Sleep dir 0 first to get fallback status.
-    let (sleep_down_raw, sleep_timing_raw, _, _, sleep_fallback) =
-        load_and_scale_animation("Sleep", &sheets, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[0])?;
+    let (sleep_down_raw, sleep_timing_raw, _, _, sleep_fallback) = load_and_scale_animation(
+        "Sleep",
+        &sheets,
+        &anim_infos,
+        scale,
+        Some((idle_w, idle_h)),
+        DIR_ROWS[0],
+    )?;
     let (sleep_frames_by_dir, sleep_timing) = if sleep_fallback {
         // Reuse Idle frames for all 4 directions
         (slot.cached_idle.clone(), idle_timing.clone())
     } else {
-        let sleep_left = load_and_scale_animation("Sleep", &sheets, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[1])
-            .map(|r| r.0)
-            .unwrap_or_else(|_| sleep_down_raw.clone());
-        let sleep_up = load_and_scale_animation("Sleep", &sheets, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[2])
-            .map(|r| r.0)
-            .unwrap_or_else(|_| sleep_down_raw.clone());
-        let sleep_right = load_and_scale_animation("Sleep", &sheets, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[3])
-            .map(|r| r.0)
-            .unwrap_or_else(|_| sleep_down_raw.clone());
-        ([sleep_down_raw, sleep_left, sleep_up, sleep_right], sleep_timing_raw)
+        let sleep_left = load_and_scale_animation(
+            "Sleep",
+            &sheets,
+            &anim_infos,
+            scale,
+            Some((idle_w, idle_h)),
+            DIR_ROWS[1],
+        )
+        .map(|r| r.0)
+        .unwrap_or_else(|_| sleep_down_raw.clone());
+        let sleep_up = load_and_scale_animation(
+            "Sleep",
+            &sheets,
+            &anim_infos,
+            scale,
+            Some((idle_w, idle_h)),
+            DIR_ROWS[2],
+        )
+        .map(|r| r.0)
+        .unwrap_or_else(|_| sleep_down_raw.clone());
+        let sleep_right = load_and_scale_animation(
+            "Sleep",
+            &sheets,
+            &anim_infos,
+            scale,
+            Some((idle_w, idle_h)),
+            DIR_ROWS[3],
+        )
+        .map(|r| r.0)
+        .unwrap_or_else(|_| sleep_down_raw.clone());
+        (
+            [sleep_down_raw, sleep_left, sleep_up, sleep_right],
+            sleep_timing_raw,
+        )
     };
     slot.cached_sleep = sleep_frames_by_dir;
 
     // Give the animator timing-only Animation objects (no pixel data).
     slot.animator = Animator::new();
-    slot.animator.load_animations(idle_timing, eat_timing, sleep_timing);
+    slot.animator
+        .load_animations(idle_timing, eat_timing, sleep_timing);
 
     // Invalidate encoded frames so the first render re-encodes for the actual Rect.
     slot.encoded_rect = None;
@@ -697,7 +811,11 @@ fn encode_all_frames(slot: &mut CreatureSlot, picker: &Picker, area: Rect) {
         std::array::from_fn(|dir_idx| {
             cache[dir_idx]
                 .iter()
-                .map(|img| picker.new_protocol(img.clone(), area, Resize::Fit(None)).ok())
+                .map(|img| {
+                    picker
+                        .new_protocol(img.clone(), area, Resize::Fit(None))
+                        .ok()
+                })
                 .collect()
         })
     });
@@ -730,53 +848,73 @@ fn velocity_to_dir(vel_x: f32, vel_y: f32) -> usize {
 /// Elastic circle collision between all creature pairs.
 /// Treats each sprite as a circle with radius = min(sprite_w, sprite_h) / 2 cells.
 /// Pushes overlapping pairs apart and reflects velocity along the collision normal.
-fn resolve_collisions(slots: &mut Vec<CreatureSlot>, sprite_w: u16, sprite_h: u16, pen_w: u16, pen_h: u16) {
+fn resolve_collisions(
+    slots: &mut Vec<CreatureSlot>,
+    sprite_w: u16,
+    sprite_h: u16,
+    pen_w: u16,
+    pen_h: u16,
+) {
     let n = slots.len();
     if n < 2 {
         return;
     }
 
-    let radius = (sprite_w.min(sprite_h) as f32) / 2.0;
-    let min_dist = radius * 2.0;
-    let hw = sprite_w as f32 / 2.0;
-    let hh = sprite_h as f32 / 2.0;
+    let sprite_wf = sprite_w as f32;
+    let sprite_hf = sprite_h as f32;
 
     for i in 0..n {
         for j in (i + 1)..n {
-            let cx_i = slots[i].pos_x + hw;
-            let cy_i = slots[i].pos_y + hh;
-            let cx_j = slots[j].pos_x + hw;
-            let cy_j = slots[j].pos_y + hh;
+            let left_i = slots[i].pos_x;
+            let top_i = slots[i].pos_y;
+            let right_i = left_i + sprite_wf;
+            let bottom_i = top_i + sprite_hf;
 
-            let dx = cx_j - cx_i;
-            let dy = cy_j - cy_i;
-            let dist_sq = dx * dx + dy * dy;
+            let left_j = slots[j].pos_x;
+            let top_j = slots[j].pos_y;
+            let right_j = left_j + sprite_wf;
+            let bottom_j = top_j + sprite_hf;
 
-            if dist_sq >= min_dist * min_dist || dist_sq < 0.001 {
+            let overlap_x = right_i.min(right_j) - left_i.max(left_j);
+            let overlap_y = bottom_i.min(bottom_j) - top_i.max(top_j);
+
+            if overlap_x <= 0.0 || overlap_y <= 0.0 {
                 continue;
             }
 
-            let dist = dist_sq.sqrt();
-            let nx = dx / dist;
-            let ny = dy / dist;
+            // Resolve along the axis of least penetration to prevent deep overlap.
+            if overlap_x <= overlap_y {
+                let push = overlap_x / 2.0 + 0.01;
+                let moving_right = (left_j + right_j) >= (left_i + right_i);
+                if moving_right {
+                    slots[i].pos_x -= push;
+                    slots[j].pos_x += push;
+                } else {
+                    slots[i].pos_x += push;
+                    slots[j].pos_x -= push;
+                }
 
-            // Push apart so they no longer overlap
-            let overlap = (min_dist - dist) / 2.0;
-            slots[i].pos_x -= nx * overlap;
-            slots[i].pos_y -= ny * overlap;
-            slots[j].pos_x += nx * overlap;
-            slots[j].pos_y += ny * overlap;
+                // Bounce by swapping horizontal velocity components.
+                let vi = slots[i].vel_x;
+                let vj = slots[j].vel_x;
+                slots[i].vel_x = -vj;
+                slots[j].vel_x = -vi;
+            } else {
+                let push = overlap_y / 2.0 + 0.01;
+                let moving_down = (top_j + bottom_j) >= (top_i + bottom_i);
+                if moving_down {
+                    slots[i].pos_y -= push;
+                    slots[j].pos_y += push;
+                } else {
+                    slots[i].pos_y += push;
+                    slots[j].pos_y -= push;
+                }
 
-            // Elastic collision: reflect relative velocity along normal
-            let dv_x = slots[j].vel_x - slots[i].vel_x;
-            let dv_y = slots[j].vel_y - slots[i].vel_y;
-            let dot = dv_x * nx + dv_y * ny;
-            if dot < 0.0 {
-                // Only apply impulse if approaching (dot < 0)
-                slots[i].vel_x += dot * nx;
-                slots[i].vel_y += dot * ny;
-                slots[j].vel_x -= dot * nx;
-                slots[j].vel_y -= dot * ny;
+                // Bounce by swapping vertical velocity components.
+                let vi = slots[i].vel_y;
+                let vj = slots[j].vel_y;
+                slots[i].vel_y = -vj;
+                slots[j].vel_y = -vi;
             }
         }
     }
@@ -1031,22 +1169,36 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
             slot.pos_x = rng.gen_range(0.0..=max_px.max(0.0));
             // Staggered vertical start: divide pen height into count slots.
             // Each creature gets its own slot so they start spread out vertically.
-            let y_step = if count > 1 { max_py / (count - 1) as f32 } else { 0.0 };
+            let y_step = if count > 1 {
+                max_py / (count - 1) as f32
+            } else {
+                0.0
+            };
             let base_y = i as f32 * y_step;
             // Small random jitter (±20% of step) so they don't look rigidly spaced.
             let jitter = rng.gen_range(-y_step * 0.2..=y_step * 0.2_f32);
             slot.pos_y = (base_y + jitter).clamp(0.0, max_py.max(0.0));
             slot.vel_x = rng.gen_range(-0.4..=0.4_f32);
             slot.vel_y = rng.gen_range(-0.4..=0.4_f32);
-            if slot.vel_x.abs() < 0.12 { slot.vel_x = if slot.vel_x >= 0.0 { 0.18 } else { -0.18 }; }
-            if slot.vel_y.abs() < 0.12 { slot.vel_y = if slot.vel_y >= 0.0 { 0.18 } else { -0.18 }; }
+            if slot.vel_x.abs() < 0.12 {
+                slot.vel_x = if slot.vel_x >= 0.0 { 0.18 } else { -0.18 };
+            }
+            if slot.vel_y.abs() < 0.12 {
+                slot.vel_y = if slot.vel_y >= 0.0 { 0.18 } else { -0.18 };
+            }
             slot.dir_hold_ticks = rng.gen_range(40_u32..160);
         }
 
         // Update position for this tick (frozen during eating/sleeping).
         // Direction is locked inside update_position when a new heading is picked.
         let is_moving = matches!(slot.animator.state(), AnimationState::Idle);
-        slot.update_position(pen_inner.width, pen_inner.height, sprite_w, sprite_h, is_moving);
+        slot.update_position(
+            pen_inner.width,
+            pen_inner.height,
+            sprite_w,
+            sprite_h,
+            is_moving,
+        );
 
         // Lazily encode (or re-encode on resize) — compare size only, not position.
         if slot.encoded_rect != Some(size_rect) {
@@ -1055,7 +1207,20 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
     }
 
     // Phase 2: resolve creature-to-creature collisions (elastic bounce).
-    resolve_collisions(&mut app.slots, SPRITE_W, SPRITE_H, pen_inner.width, pen_inner.height);
+    resolve_collisions(
+        &mut app.slots,
+        SPRITE_W,
+        SPRITE_H,
+        pen_inner.width,
+        pen_inner.height,
+    );
+
+    // Keep animation facing synchronized with post-collision velocity while moving.
+    for slot in &mut app.slots {
+        if matches!(slot.animator.state(), AnimationState::Idle) && slot.pause_ticks == 0 {
+            slot.current_dir = velocity_to_dir(slot.vel_x, slot.vel_y);
+        }
+    }
 
     // ── Phase 3a: render all labels first (lowest visual priority) ──────────────
     // Sprites render after labels so sprite pixels always overwrite label text
@@ -1068,37 +1233,27 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
         let render_y = (pen_inner.y + slot.pos_y.round() as u16)
             .min(pen_inner.y + pen_inner.height.saturating_sub(sprite_h + LABEL_H));
 
-        let label_x = render_x;
+        let is_selected = selected == i;
+        let selected_prefix = if is_selected { "◉ " } else { "" };
+        let label_text = format!(
+            "{}{} Lv.1",
+            selected_prefix,
+            slot.creature_name.to_uppercase()
+        );
+        let label_w = (label_text.chars().count() as u16).clamp(6, sprite_w);
+        let label_x = render_x + (sprite_w.saturating_sub(label_w) / 2);
         let label_y = render_y + sprite_h;
 
         if label_y + LABEL_H <= pen_inner.y + pen_inner.height {
-            let label_area = Rect::new(label_x, label_y, sprite_w, LABEL_H);
-            let block = Block::default().borders(Borders::ALL);
-            let inner = block.inner(label_area);
-            f.render_widget(block, label_area);
-
-            let is_selected = selected == i;
-            let pokeball = if is_selected { "◉ " } else { "  " };
-            let name_str = format!("{}{}", pokeball, slot.creature_name.to_uppercase());
-            let name_color = if is_selected { Color::Yellow } else { Color::White };
-
-            let state_icon = match slot.animator.state() {
-                AnimationState::Idle     => "",
-                AnimationState::Eating   => " 🍖",
-                AnimationState::Sleeping => " 💤",
+            let label_area = Rect::new(label_x, label_y, label_w, LABEL_H);
+            let label_color = if is_selected {
+                Color::Yellow
+            } else {
+                Color::Gray
             };
-            let level_str = format!("  Lv.1{}", state_icon);
-
-            let row1 = Rect::new(inner.x, inner.y,     inner.width, 1);
-            let row2 = Rect::new(inner.x, inner.y + 1, inner.width, 1);
-
             f.render_widget(
-                Paragraph::new(name_str).style(Style::default().fg(name_color)),
-                row1,
-            );
-            f.render_widget(
-                Paragraph::new(level_str).style(Style::default().fg(Color::DarkGray)),
-                row2,
+                Paragraph::new(label_text).style(Style::default().fg(label_color)),
+                label_area,
             );
         }
     }
@@ -1111,8 +1266,8 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
         let state = slot.animator.state();
         let frame_idx = slot.animator.current_frame_index().unwrap_or(0);
         let state_idx = match state {
-            AnimationState::Idle     => 0,
-            AnimationState::Eating   => 1,
+            AnimationState::Idle => 0,
+            AnimationState::Eating => 1,
             AnimationState::Sleeping => 2,
         };
         let dir_idx = slot.current_dir;
@@ -1239,11 +1394,7 @@ mod tests {
 
     #[test]
     fn test_remove_all_but_one_via_repeated_removes() {
-        let mut app = make_app(&[
-            (1, "Bulbasaur"),
-            (4, "Charmander"),
-            (7, "Squirtle"),
-        ]);
+        let mut app = make_app(&[(1, "Bulbasaur"), (4, "Charmander"), (7, "Squirtle")]);
         app.selected = 0;
         app.remove_selected(); // removes Bulbasaur
         assert_eq!(app.slots.len(), 2);
@@ -1457,7 +1608,10 @@ mod tests {
         app.notify(NotifLevel::Error, "error");
         assert_eq!(app.notifications.len(), 3);
         let levels: Vec<NotifLevel> = app.notifications.iter().map(|n| n.level).collect();
-        assert_eq!(levels, vec![NotifLevel::Info, NotifLevel::Warn, NotifLevel::Error]);
+        assert_eq!(
+            levels,
+            vec![NotifLevel::Info, NotifLevel::Warn, NotifLevel::Error]
+        );
     }
 
     #[test]
@@ -1499,5 +1653,63 @@ mod tests {
         // Very long TTL — notifications should NOT be expired
         app.expire_notifications(Duration::from_secs(9999));
         assert_eq!(app.notifications.len(), 1);
+    }
+
+    // ── movement + collisions ────────────────────────────────────────────
+
+    #[test]
+    fn test_pause_face_down_keeps_down_direction() {
+        let mut slot = CreatureSlot::new(1, "Bulbasaur".to_string());
+        slot.pause_ticks = 3;
+        slot.pause_face_down = true;
+        slot.current_dir = 2; // up
+        slot.vel_x = 0.3;
+        slot.vel_y = 0.0;
+
+        slot.update_position(120, 40, SPRITE_W, SPRITE_H, true);
+
+        assert_eq!(slot.pause_ticks, 2);
+        assert_eq!(slot.current_dir, 0); // forced down while paused
+    }
+
+    #[test]
+    fn test_pause_end_resumes_velocity_direction() {
+        let mut slot = CreatureSlot::new(1, "Bulbasaur".to_string());
+        slot.pause_ticks = 1;
+        slot.pause_face_down = true;
+        slot.current_dir = 0;
+        slot.vel_x = -0.4;
+        slot.vel_y = 0.0;
+
+        slot.update_position(120, 40, SPRITE_W, SPRITE_H, true);
+
+        assert_eq!(slot.pause_ticks, 0);
+        assert_eq!(slot.current_dir, 1); // left
+        assert!(!slot.pause_face_down);
+    }
+
+    #[test]
+    fn test_collision_resolution_separates_overlapping_sprites() {
+        let mut slots = vec![
+            CreatureSlot::new(1, "Bulbasaur".to_string()),
+            CreatureSlot::new(4, "Charmander".to_string()),
+        ];
+        slots[0].pos_x = 10.0;
+        slots[0].pos_y = 10.0;
+        slots[1].pos_x = 20.0; // overlaps on x since SPRITE_W is 32
+        slots[1].pos_y = 10.0; // same y band => guaranteed overlap
+        slots[0].vel_x = 0.3;
+        slots[1].vel_x = -0.3;
+
+        resolve_collisions(&mut slots, SPRITE_W, SPRITE_H, 200, 80);
+
+        let overlap_x = (slots[0].pos_x + SPRITE_W as f32).min(slots[1].pos_x + SPRITE_W as f32)
+            - slots[0].pos_x.max(slots[1].pos_x);
+        let overlap_y = (slots[0].pos_y + SPRITE_H as f32).min(slots[1].pos_y + SPRITE_H as f32)
+            - slots[0].pos_y.max(slots[1].pos_y);
+        assert!(
+            overlap_x <= 0.0 || overlap_y <= 0.0,
+            "sprites still overlap"
+        );
     }
 }
