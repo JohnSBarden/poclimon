@@ -25,9 +25,13 @@ use ratatui::{
 };
 use ratatui_image::{Image, Resize, picker::Picker, protocol::Protocol};
 use std::collections::{HashMap, VecDeque};
+use std::fs::OpenOptions;
 use std::io;
+use std::io::Write;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Parser)]
 #[command(version, about = "PoCLImon - A terminal-based creature virtual pet")]
@@ -78,6 +82,32 @@ const SPRITE_W: u16 = 32;
 const SPRITE_H: u16 = 10; // was 16 — tighter area, label sits close to sprite
 
 const LABEL_H: u16 = 1; // single compact line below sprite
+
+/// Optional debug log sink enabled by `POCLIMON_DEBUG_LOG=/path/to/file`.
+/// Logs are append-only and intentionally low-level for render/movement triage.
+fn debug_log(msg: impl AsRef<str>) {
+    static DEBUG_FILE: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
+    let sink = DEBUG_FILE.get_or_init(|| {
+        let path = std::env::var("POCLIMON_DEBUG_LOG").ok()?;
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()?;
+        Some(Mutex::new(file))
+    });
+    let Some(file_lock) = sink else {
+        return;
+    };
+    let Ok(mut file) = file_lock.lock() else {
+        return;
+    };
+    let ts_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let _ = writeln!(file, "{} {}", ts_ms, msg.as_ref());
+}
 
 // ── Notification system ────────────────────────────────────────────────────────
 
@@ -196,6 +226,10 @@ impl CreatureSlot {
                 // Resume movement facing the heading we'll actually move in.
                 self.current_dir = velocity_to_dir(self.vel_x, self.vel_y);
                 self.pause_face_down = false;
+                debug_log(format!(
+                    "pause_end id={} dir={} vx={:.3} vy={:.3}",
+                    self.creature_id, self.current_dir, self.vel_x, self.vel_y
+                ));
             } else if self.pause_face_down {
                 self.current_dir = 0;
             }
@@ -232,6 +266,15 @@ impl CreatureSlot {
                 } else {
                     self.current_dir = old_dir;
                 }
+                debug_log(format!(
+                    "heading_change id={} old_dir={} new_dir={} hold={} pause={} face_down={}",
+                    self.creature_id,
+                    old_dir,
+                    new_dir,
+                    self.dir_hold_ticks,
+                    self.pause_ticks,
+                    self.pause_face_down
+                ));
             } else {
                 self.pause_face_down = false;
             }
@@ -242,6 +285,10 @@ impl CreatureSlot {
             // Lock direction for the entire heading — only update here, never from live velocity.
             if self.pause_ticks == 0 {
                 self.current_dir = velocity_to_dir(new_vx, new_vy);
+                debug_log(format!(
+                    "heading_apply id={} dir={} vx={:.3} vy={:.3}",
+                    self.creature_id, self.current_dir, self.vel_x, self.vel_y
+                ));
             }
 
             // Hold this direction for 2–8 seconds (40–160 ticks).
@@ -265,18 +312,46 @@ impl CreatureSlot {
         if self.pos_x < 0.0 {
             self.pos_x = 0.0;
             self.vel_x = self.vel_x.abs();
+            if self.pause_ticks == 0 {
+                self.current_dir = velocity_to_dir(self.vel_x, self.vel_y);
+                debug_log(format!(
+                    "wall_bounce id={} axis=x dir={} vx={:.3} vy={:.3}",
+                    self.creature_id, self.current_dir, self.vel_x, self.vel_y
+                ));
+            }
         }
         if self.pos_x > max_x {
             self.pos_x = max_x;
             self.vel_x = -self.vel_x.abs();
+            if self.pause_ticks == 0 {
+                self.current_dir = velocity_to_dir(self.vel_x, self.vel_y);
+                debug_log(format!(
+                    "wall_bounce id={} axis=x dir={} vx={:.3} vy={:.3}",
+                    self.creature_id, self.current_dir, self.vel_x, self.vel_y
+                ));
+            }
         }
         if self.pos_y < 0.0 {
             self.pos_y = 0.0;
             self.vel_y = self.vel_y.abs();
+            if self.pause_ticks == 0 {
+                self.current_dir = velocity_to_dir(self.vel_x, self.vel_y);
+                debug_log(format!(
+                    "wall_bounce id={} axis=y dir={} vx={:.3} vy={:.3}",
+                    self.creature_id, self.current_dir, self.vel_x, self.vel_y
+                ));
+            }
         }
         if self.pos_y > max_y {
             self.pos_y = max_y;
             self.vel_y = -self.vel_y.abs();
+            if self.pause_ticks == 0 {
+                self.current_dir = velocity_to_dir(self.vel_x, self.vel_y);
+                debug_log(format!(
+                    "wall_bounce id={} axis=y dir={} vx={:.3} vy={:.3}",
+                    self.creature_id, self.current_dir, self.vel_x, self.vel_y
+                ));
+            }
         }
     }
 }
@@ -885,8 +960,10 @@ fn resolve_collisions(
             // Resolve along the axis of least penetration to prevent deep overlap.
             if overlap_x <= overlap_y {
                 let push = overlap_x / 2.0 + 0.01;
-                let moving_right = (left_j + right_j) >= (left_i + right_i);
-                if moving_right {
+                let center_i = left_i + sprite_wf / 2.0;
+                let center_j = left_j + sprite_wf / 2.0;
+                let j_is_right = center_j >= center_i;
+                if j_is_right {
                     slots[i].pos_x -= push;
                     slots[j].pos_x += push;
                 } else {
@@ -894,15 +971,20 @@ fn resolve_collisions(
                     slots[j].pos_x -= push;
                 }
 
-                // Bounce by swapping horizontal velocity components.
-                let vi = slots[i].vel_x;
-                let vj = slots[j].vel_x;
-                slots[i].vel_x = -vj;
-                slots[j].vel_x = -vi;
+                // Bounce away from each other on X.
+                if j_is_right {
+                    slots[i].vel_x = -slots[i].vel_x.abs();
+                    slots[j].vel_x = slots[j].vel_x.abs();
+                } else {
+                    slots[i].vel_x = slots[i].vel_x.abs();
+                    slots[j].vel_x = -slots[j].vel_x.abs();
+                }
             } else {
                 let push = overlap_y / 2.0 + 0.01;
-                let moving_down = (top_j + bottom_j) >= (top_i + bottom_i);
-                if moving_down {
+                let center_i = top_i + sprite_hf / 2.0;
+                let center_j = top_j + sprite_hf / 2.0;
+                let j_is_below = center_j >= center_i;
+                if j_is_below {
                     slots[i].pos_y -= push;
                     slots[j].pos_y += push;
                 } else {
@@ -910,12 +992,35 @@ fn resolve_collisions(
                     slots[j].pos_y -= push;
                 }
 
-                // Bounce by swapping vertical velocity components.
-                let vi = slots[i].vel_y;
-                let vj = slots[j].vel_y;
-                slots[i].vel_y = -vj;
-                slots[j].vel_y = -vi;
+                // Bounce away from each other on Y.
+                if j_is_below {
+                    slots[i].vel_y = -slots[i].vel_y.abs();
+                    slots[j].vel_y = slots[j].vel_y.abs();
+                } else {
+                    slots[i].vel_y = slots[i].vel_y.abs();
+                    slots[j].vel_y = -slots[j].vel_y.abs();
+                }
             }
+
+            if slots[i].pause_ticks == 0 {
+                slots[i].current_dir = velocity_to_dir(slots[i].vel_x, slots[i].vel_y);
+            }
+            if slots[j].pause_ticks == 0 {
+                slots[j].current_dir = velocity_to_dir(slots[j].vel_x, slots[j].vel_y);
+            }
+            debug_log(format!(
+                "collision i={} j={} ox={:.2} oy={:.2} dir_i={} dir_j={} vix={:.3} viy={:.3} vjx={:.3} vjy={:.3}",
+                slots[i].creature_id,
+                slots[j].creature_id,
+                overlap_x,
+                overlap_y,
+                slots[i].current_dir,
+                slots[j].current_dir,
+                slots[i].vel_x,
+                slots[i].vel_y,
+                slots[j].vel_x,
+                slots[j].vel_y
+            ));
         }
     }
 
@@ -926,6 +1031,44 @@ fn resolve_collisions(
         slot.pos_x = slot.pos_x.clamp(0.0, max_x);
         slot.pos_y = slot.pos_y.clamp(0.0, max_y);
     }
+}
+
+/// Pick a renderable protocol frame with fallbacks:
+/// 1) requested state+dir with wrapped frame index
+/// 2) any frame in requested state+dir
+/// 3) any direction in requested state
+/// 4) any direction in Idle state
+fn pick_protocol_index(
+    encoded: &[[Vec<Option<Protocol>>; 4]; 3],
+    state_idx: usize,
+    dir_idx: usize,
+    frame_idx: usize,
+) -> Option<(usize, usize, usize)> {
+    fn pick_from_dir_index(dir_frames: &[Option<Protocol>], frame_idx: usize) -> Option<usize> {
+        if dir_frames.is_empty() {
+            return None;
+        }
+        let wrapped = frame_idx % dir_frames.len();
+        if dir_frames[wrapped].is_some() {
+            return Some(wrapped);
+        }
+        dir_frames.iter().position(|o| o.is_some())
+    }
+
+    for s in [state_idx, 0] {
+        if let Some(fi) = pick_from_dir_index(&encoded[s][dir_idx], frame_idx) {
+            return Some((s, dir_idx, fi));
+        }
+        for d in 0..4 {
+            if d == dir_idx {
+                continue;
+            }
+            if let Some(fi) = pick_from_dir_index(&encoded[s][d], frame_idx) {
+                return Some((s, d, fi));
+            }
+        }
+    }
+    None
 }
 
 // ── Application entry point ────────────────────────────────────────────────────
@@ -1199,6 +1342,13 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
             sprite_h,
             is_moving,
         );
+        if slot.current_dir > 3 {
+            debug_log(format!(
+                "bad_dir id={} dir={} vx={:.3} vy={:.3}",
+                slot.creature_id, slot.current_dir, slot.vel_x, slot.vel_y
+            ));
+            slot.current_dir = velocity_to_dir(slot.vel_x, slot.vel_y);
+        }
 
         // Lazily encode (or re-encode on resize) — compare size only, not position.
         if slot.encoded_rect != Some(size_rect) {
@@ -1214,13 +1364,6 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
         pen_inner.width,
         pen_inner.height,
     );
-
-    // Keep animation facing synchronized with post-collision velocity while moving.
-    for slot in &mut app.slots {
-        if matches!(slot.animator.state(), AnimationState::Idle) && slot.pause_ticks == 0 {
-            slot.current_dir = velocity_to_dir(slot.vel_x, slot.vel_y);
-        }
-    }
 
     // ── Phase 3a: render all labels first (lowest visual priority) ──────────────
     // Sprites render after labels so sprite pixels always overwrite label text
@@ -1278,16 +1421,40 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
             .min(pen_inner.y + pen_inner.height.saturating_sub(sprite_h + LABEL_H));
         let img_area = Rect::new(render_x, render_y, sprite_w, sprite_h);
 
-        match slot.encoded_frames[state_idx]
-            .get_mut(dir_idx)
-            .and_then(|dir_frames| dir_frames.get_mut(frame_idx))
-            .and_then(|opt| opt.as_mut())
-        {
-            Some(protocol) => f.render_widget(Image::new(protocol), img_area),
-            None => f.render_widget(
-                Paragraph::new("Loading…").style(Style::default().fg(Color::DarkGray)),
-                img_area,
-            ),
+        match pick_protocol_index(&slot.encoded_frames, state_idx, dir_idx, frame_idx) {
+            Some((picked_state, picked_dir, picked_frame)) => {
+                if let Some(protocol) =
+                    slot.encoded_frames[picked_state][picked_dir][picked_frame].as_mut()
+                {
+                    f.render_widget(Image::new(protocol), img_area);
+                } else {
+                    debug_log(format!(
+                        "protocol_race_miss id={} state={} dir={} frame={}",
+                        slot.creature_id, picked_state, picked_dir, picked_frame
+                    ));
+                    f.render_widget(
+                        Paragraph::new("Loading…").style(Style::default().fg(Color::DarkGray)),
+                        img_area,
+                    );
+                }
+            }
+            None => {
+                debug_log(format!(
+                    "protocol_miss id={} state={} dir={} frame={} lens=[{}/{}/{}/{}]",
+                    slot.creature_id,
+                    state_idx,
+                    dir_idx,
+                    frame_idx,
+                    slot.encoded_frames[state_idx][0].len(),
+                    slot.encoded_frames[state_idx][1].len(),
+                    slot.encoded_frames[state_idx][2].len(),
+                    slot.encoded_frames[state_idx][3].len()
+                ));
+                f.render_widget(
+                    Paragraph::new("Loading…").style(Style::default().fg(Color::DarkGray)),
+                    img_area,
+                );
+            }
         }
     }
 }
