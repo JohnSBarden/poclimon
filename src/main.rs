@@ -1545,6 +1545,40 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
             }
         }
     }
+
+    // Final label pass on top of sprites so overlap remains readable.
+    for i in 0..count {
+        let slot = &app.slots[i];
+
+        let render_x = (pen_inner.x + slot.pos_x.round() as u16)
+            .min(pen_inner.x + pen_inner.width.saturating_sub(sprite_w));
+        let render_y = (pen_inner.y + slot.pos_y.round() as u16)
+            .min(pen_inner.y + pen_inner.height.saturating_sub(sprite_stack_h(sprite_h)));
+
+        let is_selected = selected == i;
+        let selected_prefix = if is_selected { "◉ " } else { "" };
+        let label_text = format!(
+            "{}{} Lv.1",
+            selected_prefix,
+            slot.creature_name.to_uppercase()
+        );
+        let label_w = (label_text.chars().count() as u16).clamp(6, sprite_w);
+        let label_x = render_x + (sprite_w.saturating_sub(label_w) / 2);
+        let label_y = render_y + sprite_h.saturating_sub(LABEL_OVERLAP);
+
+        if label_y + LABEL_H <= pen_inner.y + pen_inner.height {
+            let label_area = Rect::new(label_x, label_y, label_w, LABEL_H);
+            let label_color = if is_selected {
+                Color::Yellow
+            } else {
+                Color::Gray
+            };
+            f.render_widget(
+                Paragraph::new(label_text).style(Style::default().fg(label_color)),
+                label_area,
+            );
+        }
+    }
 }
 
 /// Compute the `Rect` for creature `index` within `pen_inner`.
