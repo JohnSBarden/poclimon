@@ -82,6 +82,7 @@ const SPRITE_W: u16 = 32;
 const SPRITE_H: u16 = 10; // was 16 — tighter area, label sits close to sprite
 
 const LABEL_H: u16 = 1; // single compact line below sprite
+const LABEL_OVERLAP: u16 = 1; // pull label 1 row into sprite bottom edge
 const COLLISION_MIN_PENETRATION: f32 = 0.75;
 const OVERLAP_STACK_THRESHOLD: f32 = 0.60;
 
@@ -109,6 +110,10 @@ fn debug_log(msg: impl AsRef<str>) {
         .map(|d| d.as_millis())
         .unwrap_or(0);
     let _ = writeln!(file, "{} {}", ts_ms, msg.as_ref());
+}
+
+fn sprite_stack_h(sprite_h: u16) -> u16 {
+    sprite_h + LABEL_H - LABEL_OVERLAP
 }
 
 // ── Notification system ────────────────────────────────────────────────────────
@@ -318,7 +323,8 @@ impl CreatureSlot {
 
         // Bounce off pen walls.
         let max_x = (pen_w as f32 - sprite_w as f32).max(0.0);
-        let max_y = (pen_h as f32 - sprite_h as f32 - LABEL_H as f32).max(0.0);
+        let max_y =
+            (pen_h as f32 - sprite_h as f32 - LABEL_H as f32 + LABEL_OVERLAP as f32).max(0.0);
 
         if self.pos_x < 0.0 {
             self.pos_x = 0.0;
@@ -919,6 +925,33 @@ fn velocity_to_dir(vel_x: f32, vel_y: f32) -> usize {
     }
 }
 
+/// Direction mapping with hysteresis to avoid rapid up/down flips while
+/// mostly moving left/right (and vice-versa).
+fn stable_velocity_to_dir(vel_x: f32, vel_y: f32, current_dir: usize) -> usize {
+    let ax = vel_x.abs();
+    let ay = vel_y.abs();
+    if ax < 0.01 && ay < 0.01 {
+        return current_dir;
+    }
+
+    if current_dir == 1 || current_dir == 3 {
+        // Keep horizontal facing unless vertical speed clearly dominates.
+        if ay >= ax * 1.8 {
+            return if vel_y >= 0.0 { 0 } else { 2 };
+        }
+        return if vel_x >= 0.0 { 3 } else { 1 };
+    }
+    if current_dir == 0 || current_dir == 2 {
+        // Keep vertical facing unless horizontal speed clearly dominates.
+        if ax >= ay * 1.8 {
+            return if vel_x >= 0.0 { 3 } else { 1 };
+        }
+        return if vel_y >= 0.0 { 0 } else { 2 };
+    }
+
+    velocity_to_dir(vel_x, vel_y)
+}
+
 /// Elastic circle collision between all creature pairs.
 /// Treats each sprite as a circle with radius = min(sprite_w, sprite_h) / 2 cells.
 /// Pushes overlapping pairs apart and reflects velocity along the collision normal.
@@ -1055,7 +1088,7 @@ fn resolve_collisions(
 
     // Re-clamp positions to pen bounds after collision resolution
     let max_x = (pen_w as f32 - sprite_w as f32).max(0.0);
-    let max_y = (pen_h as f32 - sprite_h as f32 - LABEL_H as f32).max(0.0);
+    let max_y = (pen_h as f32 - sprite_h as f32 - LABEL_H as f32 + LABEL_OVERLAP as f32).max(0.0);
     for slot in slots.iter_mut() {
         slot.pos_x = slot.pos_x.clamp(0.0, max_x);
         slot.pos_y = slot.pos_y.clamp(0.0, max_y);
@@ -1111,21 +1144,10 @@ fn maybe_update_facing_from_velocity(slot: &mut CreatureSlot) {
     if speed_sq < 0.02 {
         return;
     }
-    // Hysteresis:
-    // - require one axis to dominate before changing
-    // - keep current direction for near-diagonal vectors to avoid rapid flipping
-    let ax = slot.vel_x.abs();
-    let ay = slot.vel_y.abs();
-    let new_dir = if ax >= ay * 1.30 {
-        if slot.vel_x >= 0.0 { 3 } else { 1 }
-    } else if ay >= ax * 1.30 {
-        if slot.vel_y >= 0.0 { 0 } else { 2 }
-    } else {
-        slot.current_dir
-    };
+    let new_dir = stable_velocity_to_dir(slot.vel_x, slot.vel_y, slot.current_dir);
     if new_dir != slot.current_dir {
         slot.current_dir = new_dir;
-        slot.dir_cooldown_ticks = 3;
+        slot.dir_cooldown_ticks = 5;
         debug_log(format!(
             "facing_update id={} dir={} vx={:.3} vy={:.3}",
             slot.creature_id, slot.current_dir, slot.vel_x, slot.vel_y
@@ -1370,7 +1392,7 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
             use rand::Rng;
             let mut rng = rand::thread_rng();
             let max_px = (pen_inner.width.saturating_sub(sprite_w)) as f32;
-            let max_py = (pen_inner.height.saturating_sub(sprite_h + LABEL_H)) as f32;
+            let max_py = (pen_inner.height.saturating_sub(sprite_stack_h(sprite_h))) as f32;
             slot.pos_x = rng.gen_range(0.0..=max_px.max(0.0));
             // Staggered vertical start: divide pen height into count slots.
             // Each creature gets its own slot so they start spread out vertically.
@@ -1409,7 +1431,7 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
                 "bad_dir id={} dir={} vx={:.3} vy={:.3}",
                 slot.creature_id, slot.current_dir, slot.vel_x, slot.vel_y
             ));
-            slot.current_dir = velocity_to_dir(slot.vel_x, slot.vel_y);
+            slot.current_dir = stable_velocity_to_dir(slot.vel_x, slot.vel_y, slot.current_dir);
         }
 
         // Lazily encode (or re-encode on resize) — compare size only, not position.
@@ -1440,7 +1462,7 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
         let render_x = (pen_inner.x + slot.pos_x.round() as u16)
             .min(pen_inner.x + pen_inner.width.saturating_sub(sprite_w));
         let render_y = (pen_inner.y + slot.pos_y.round() as u16)
-            .min(pen_inner.y + pen_inner.height.saturating_sub(sprite_h + LABEL_H));
+            .min(pen_inner.y + pen_inner.height.saturating_sub(sprite_stack_h(sprite_h)));
 
         let is_selected = selected == i;
         let selected_prefix = if is_selected { "◉ " } else { "" };
@@ -1451,7 +1473,7 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
         );
         let label_w = (label_text.chars().count() as u16).clamp(6, sprite_w);
         let label_x = render_x + (sprite_w.saturating_sub(label_w) / 2);
-        let label_y = render_y + sprite_h;
+        let label_y = render_y + sprite_h.saturating_sub(LABEL_OVERLAP);
 
         if label_y + LABEL_H <= pen_inner.y + pen_inner.height {
             let label_area = Rect::new(label_x, label_y, label_w, LABEL_H);
@@ -1484,7 +1506,7 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
         let render_x = (pen_inner.x + slot.pos_x.round() as u16)
             .min(pen_inner.x + pen_inner.width.saturating_sub(sprite_w));
         let render_y = (pen_inner.y + slot.pos_y.round() as u16)
-            .min(pen_inner.y + pen_inner.height.saturating_sub(sprite_h + LABEL_H));
+            .min(pen_inner.y + pen_inner.height.saturating_sub(sprite_stack_h(sprite_h)));
         let img_area = Rect::new(render_x, render_y, sprite_w, sprite_h);
 
         match pick_protocol_index(&slot.encoded_frames, state_idx, dir_idx, frame_idx) {
