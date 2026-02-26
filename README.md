@@ -2,7 +2,7 @@
 
 **A terminal-based virtual pet — Tamagotchi in your terminal!**
 
-> **v0.0.3+ (active dev branch)** — shared pen, directional sprites, compact bordered nameplates, and ongoing collision tuning (see [Changelog](#changelog))
+> **Latest release: v0.1.0 (February 26, 2026)** — improved collision behavior, free pen movement, sprite size fixes, animation fallback, and directional sprites (see [Changelog](#changelog))
 
 > 📸 *Screenshot coming soon*
 
@@ -135,25 +135,30 @@ The `roster.creatures` array sets the starting roster. You can then use
 
 ## Changelog
 
-### v0.0.3+ (current branch status)
-- Directional sprite facing now follows movement heading with hysteresis to
-  reduce jitter.
-- Nameplates switched to compact bordered plates centered under sprites.
-- Collision footprint currently includes sprite + nameplate stack height.
-- Added runtime debug logging via `POCLIMON_DEBUG_LOG` for collision/render triage.
-- **Known active work:** collision behavior in crowded overlap cases is still
-  being tuned.
+### v0.1.0 (2026-02-26)
+- Improved collision behavior.
+- Carries forward the v0.0.4 movement/render improvements.
+
+### v0.0.4 (2026-02-25)
+- Free pen movement.
+- Sprite size fix.
+- Animation fallback.
 
 ### v0.0.3
 - **Shared pen view** — replaced the bordered-box grid with a single open
   canvas. All creatures share one area; the selected creature is highlighted
   with a selected marker in yellow. No internal dividers.
+- Directional sprite facing follows movement heading with hysteresis to reduce
+  jitter.
+- Nameplates switched to compact bordered plates centered under sprites.
 - **Memory optimisation** — scale default changed from 6 → 3 (4× less RAM
   per frame). Frame cache capped at 8 frames per animation. `Animation` is
   now timing-only; pixel data lives exclusively in the slot cache (no more
   double-storage).
 - **New unit tests** — pen layout (`compute_creature_region`) and frame
   capping (`cap_frames`) fully tested.
+- Added runtime debug logging via `POCLIMON_DEBUG_LOG` for collision/render
+  triage.
 
 ### v0.0.2
 - Multi-creature grid layout (1–6 slots, bordered boxes)
