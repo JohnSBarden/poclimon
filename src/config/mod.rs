@@ -4,6 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+pub const MAX_ACTIVE_CREATURES: usize = 6;
+
 #[derive(Error, Debug)]
 pub enum ConfigError {
     #[error("Failed to read config file: {0}")]
@@ -130,9 +132,12 @@ impl GameConfig {
     pub fn from_toml(toml: TomlConfig) -> Result<Self, ConfigError> {
         let creatures = &toml.roster.creatures;
 
-        if creatures.len() > 11 {
+        if creatures.len() > MAX_ACTIVE_CREATURES {
             return Err(ConfigError::Validation(
-                "Maximum 11 creatures allowed in roster".to_string(),
+                format!(
+                    "Maximum {} creatures allowed in roster",
+                    MAX_ACTIVE_CREATURES
+                ),
             ));
         }
 
@@ -225,16 +230,16 @@ creatures = ["25", "1"]
     }
 
     #[test]
-    fn test_validation_max_eleven() {
-        // Build a roster with 12 entries (exceeds the limit of 11).
+    fn test_validation_max_six() {
+        // Build a roster with 7 entries (exceeds the limit of 6).
         let toml_str = r#"
 [roster]
-creatures = ["pikachu","eevee","bulbasaur","charmander","squirtle","vaporeon","jolteon","flareon","articuno","zapdos","moltres","pikachu"]
+creatures = ["pikachu","eevee","bulbasaur","charmander","squirtle","vaporeon","jolteon"]
 "#;
         let toml_config: TomlConfig = toml::from_str(toml_str).unwrap();
         let result = GameConfig::from_toml(toml_config);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Maximum 11"));
+        assert!(result.unwrap_err().to_string().contains("Maximum 6"));
     }
 
     #[test]
@@ -316,4 +321,3 @@ creatures = ["134", "135", "136", "144", "145", "146"]
         assert_eq!(config.roster[5].1, "Moltres");
     }
 }
-

@@ -9,7 +9,7 @@ use anim_data::AnimInfo;
 use animation::{Animation, AnimationState, Animator};
 use anyhow::Result;
 use clap::Parser;
-use config::GameConfig;
+use config::{GameConfig, MAX_ACTIVE_CREATURES};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
     execute,
@@ -74,7 +74,7 @@ const MAX_CACHED_FRAMES: usize = 8;
 /// Maximum number of simultaneous creature slots in the pen.
 /// Used to compute fixed column widths so adding a creature never
 /// shifts existing columns (which would invalidate all encoded Protocols).
-const MAX_SLOTS: usize = 6;
+const MAX_SLOTS: usize = MAX_ACTIVE_CREATURES;
 
 /// Fixed sprite render size in terminal cells. All sprites are this size
 /// regardless of pen dimensions. 32×32 gives a clear, consistent look.
@@ -479,7 +479,7 @@ impl App {
     /// or the roster is already at the display limit (6 slots).
     fn add_creature(&mut self) {
         // Cap at 6 for the pen renderer.
-        if self.slots.len() >= 6 {
+        if self.slots.len() >= MAX_ACTIVE_CREATURES {
             return;
         }
 
