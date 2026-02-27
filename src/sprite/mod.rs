@@ -19,7 +19,7 @@ const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The animation names we need for our virtual pet.
-const NEEDED_ANIMS: &[&str] = &["Idle", "Sleep", "Eat"];
+const NEEDED_ANIMS: &[&str] = &["Idle", "Sleep", "Eat", "Spin", "Rotate"];
 
 /// Result type for [`download_all_sprites`]:
 /// `(anim_data_path, downloaded_sheets, warning_messages)`.

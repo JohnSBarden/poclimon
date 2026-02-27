@@ -87,7 +87,8 @@ const LABEL_H: u16 = 3; // compact bordered plate: top border + 1 row + bottom b
 const LABEL_OVERLAP: u16 = 0; // keep readable by hugging sprite edge, not overlapping pixels
 const COLLISION_MIN_PENETRATION: f32 = 0.75;
 const OVERLAP_STACK_THRESHOLD: f32 = 0.60;
-const RECALL_TICKS: u8 = 12;
+const RECALL_TICKS: u8 = 18;
+const RECALL_FLASH_SHRINK_DELAY_TICKS: u8 = 10;
 
 /// Optional debug log sink enabled by `POCLIMON_DEBUG_LOG=/path/to/file`.
 /// Logs are append-only and intentionally low-level for render/movement triage.
@@ -183,12 +184,15 @@ struct CreatureSlot {
     cached_eat: [Vec<image::DynamicImage>; 4],
     /// Pre-scaled, normalized frames for the Sleep animation, indexed by direction.
     cached_sleep: [Vec<image::DynamicImage>; 4],
+    /// Pre-scaled, normalized frames for recall animation, preferring Spin and
+    /// falling back to Rotate, then Idle.
+    cached_recall: [Vec<image::DynamicImage>; 4],
     /// Pre-encoded Protocol objects, indexed by [state_index][dir_index][frame_index].
-    /// state 0 = Idle, 1 = Eat, 2 = Sleep.
+    /// state 0 = Idle, 1 = Eat, 2 = Sleep, 3 = Recall.
     /// dir: 0=Down, 1=Left, 2=Up, 3=Right.
     /// `None` entries mean encoding failed for that frame (fallback shown).
     /// Rebuilt whenever `encoded_rect` changes (terminal resize or first render).
-    encoded_frames: [[Vec<Option<Protocol>>; 4]; 3],
+    encoded_frames: [[Vec<Option<Protocol>>; 4]; 4],
     /// The size `Rect` (position 0,0) these protocols were encoded for.
     /// `None` means not yet encoded. Position-independent — re-encode only on resize.
     encoded_rect: Option<Rect>,
@@ -225,6 +229,7 @@ impl CreatureSlot {
             cached_idle: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
             cached_eat: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
             cached_sleep: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            cached_recall: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
             encoded_frames: std::array::from_fn(|_| std::array::from_fn(|_| Vec::new())),
             encoded_rect: None,
             pos_x: 0.0,
@@ -921,6 +926,100 @@ fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<String>>
     };
     slot.cached_sleep = sleep_frames_by_dir;
 
+    // Recall animation for swap transitions:
+    // prefer Spin -> fallback Rotate -> fallback Idle.
+    let (recall_frames_by_dir, _recall_name) = {
+        let (spin_down, _, _, _, spin_fallback) = load_and_scale_animation(
+            "Spin",
+            &sheets,
+            &anim_infos,
+            scale,
+            Some((idle_w, idle_h)),
+            DIR_ROWS[0],
+        )?;
+        if !spin_fallback {
+            let spin_left = load_and_scale_animation(
+                "Spin",
+                &sheets,
+                &anim_infos,
+                scale,
+                Some((idle_w, idle_h)),
+                DIR_ROWS[1],
+            )
+            .map(|r| r.0)
+            .unwrap_or_else(|_| spin_down.clone());
+            let spin_up = load_and_scale_animation(
+                "Spin",
+                &sheets,
+                &anim_infos,
+                scale,
+                Some((idle_w, idle_h)),
+                DIR_ROWS[2],
+            )
+            .map(|r| r.0)
+            .unwrap_or_else(|_| spin_down.clone());
+            let spin_right = load_and_scale_animation(
+                "Spin",
+                &sheets,
+                &anim_infos,
+                scale,
+                Some((idle_w, idle_h)),
+                DIR_ROWS[3],
+            )
+            .map(|r| r.0)
+            .unwrap_or_else(|_| spin_down.clone());
+            ([spin_down, spin_left, spin_up, spin_right], "Spin")
+        } else {
+            let (rotate_down, _, _, _, rotate_fallback) = load_and_scale_animation(
+                "Rotate",
+                &sheets,
+                &anim_infos,
+                scale,
+                Some((idle_w, idle_h)),
+                DIR_ROWS[0],
+            )?;
+            if !rotate_fallback {
+                let rotate_left = load_and_scale_animation(
+                    "Rotate",
+                    &sheets,
+                    &anim_infos,
+                    scale,
+                    Some((idle_w, idle_h)),
+                    DIR_ROWS[1],
+                )
+                .map(|r| r.0)
+                .unwrap_or_else(|_| rotate_down.clone());
+                let rotate_up = load_and_scale_animation(
+                    "Rotate",
+                    &sheets,
+                    &anim_infos,
+                    scale,
+                    Some((idle_w, idle_h)),
+                    DIR_ROWS[2],
+                )
+                .map(|r| r.0)
+                .unwrap_or_else(|_| rotate_down.clone());
+                let rotate_right = load_and_scale_animation(
+                    "Rotate",
+                    &sheets,
+                    &anim_infos,
+                    scale,
+                    Some((idle_w, idle_h)),
+                    DIR_ROWS[3],
+                )
+                .map(|r| r.0)
+                .unwrap_or_else(|_| rotate_down.clone());
+                (
+                    [rotate_down, rotate_left, rotate_up, rotate_right],
+                    "Rotate",
+                )
+            } else {
+                (slot.cached_idle.clone(), "Idle")
+            }
+        }
+    };
+    slot.cached_recall = recall_frames_by_dir;
+
     // Give the animator timing-only Animation objects (no pixel data).
     slot.animator = Animator::new();
     slot.animator
@@ -930,18 +1029,28 @@ fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<String>>
     slot.encoded_rect = None;
     slot.encoded_frames = std::array::from_fn(|_| std::array::from_fn(|_| Vec::new()));
 
-    // Filter out warnings for animations we gracefully handled via Idle fallback.
+    // Filter out warnings for animations we gracefully handled via Idle fallback
+    // or optional recall animation fallbacks (Spin/Rotate).
     let filtered_warnings = if eat_fallback || sleep_fallback {
         warnings
             .into_iter()
             .filter(|w| {
                 let w_lower = w.to_lowercase();
                 // Keep warnings that aren't about the animations we handled
-                !(eat_fallback && w_lower.contains("eat") || sleep_fallback && w_lower.contains("sleep"))
+                !(eat_fallback && w_lower.contains("eat")
+                    || sleep_fallback && w_lower.contains("sleep")
+                    || w_lower.contains("spin")
+                    || w_lower.contains("rotate"))
             })
             .collect()
     } else {
         warnings
+            .into_iter()
+            .filter(|w| {
+                let w_lower = w.to_lowercase();
+                !(w_lower.contains("spin") || w_lower.contains("rotate"))
+            })
+            .collect()
     };
 
     Ok(filtered_warnings)
@@ -1040,18 +1149,20 @@ fn load_and_scale_animation(
 /// a frame is a cheap table lookup — no DynamicImage copies, no alloc/free
 /// churn.
 ///
-/// Encodes all 4 directions (Down/Left/Up/Right) for each of the 3 states
-/// (Idle/Eat/Sleep), giving `encoded_frames[state][dir][frame]`.
+/// Encodes all 4 directions (Down/Left/Up/Right) for each state
+/// (Idle/Eat/Sleep/Recall), giving `encoded_frames[state][dir][frame]`.
 ///
 /// Memory: each `Protocol::Halfblocks` stores only `Vec<HalfBlock>` + a
-/// `Rect`, no source image.  8 frames × 4 dirs × 3 states × 6 slots ≈ 23 MB total.
+/// `Rect`, no source image. 8 frames × 4 dirs × 4 states × 6 slots is bounded
+/// and cached per-slot.
 fn encode_all_frames(slot: &mut CreatureSlot, picker: &Picker, area: Rect) {
     // Clone caches to avoid simultaneous shared+mutable borrows of `slot`.
     let idle = slot.cached_idle.clone();
     let eat = slot.cached_eat.clone();
     let sleep = slot.cached_sleep.clone();
+    let recall = slot.cached_recall.clone();
 
-    let caches: [&[Vec<image::DynamicImage>; 4]; 3] = [&idle, &eat, &sleep];
+    let caches: [&[Vec<image::DynamicImage>; 4]; 4] = [&idle, &eat, &sleep, &recall];
 
     slot.encoded_frames = std::array::from_fn(|state_idx| {
         let cache = caches[state_idx];
@@ -1269,7 +1380,7 @@ fn resolve_collisions(
 /// 3) any direction in requested state
 /// 4) any direction in Idle state
 fn pick_protocol_index(
-    encoded: &[[Vec<Option<Protocol>>; 4]; 3],
+    encoded: &[[Vec<Option<Protocol>>; 4]; 4],
     state_idx: usize,
     dir_idx: usize,
     frame_idx: usize,
@@ -1659,8 +1770,8 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
         let slot = &mut app.slots[i];
 
         let state = slot.animator.state();
-        let frame_idx = slot.animator.current_frame_index().unwrap_or(0);
-        let state_idx = match state {
+        let mut frame_idx = slot.animator.current_frame_index().unwrap_or(0);
+        let mut state_idx = match state {
             AnimationState::Idle => 0,
             AnimationState::Eating => 1,
             AnimationState::Sleeping => 2,
@@ -1675,16 +1786,25 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
 
         let is_transition_slot = transition_slot_index == Some(i);
         let mut render_waiting_ball = false;
+        let mut white_flash = false;
         if let Some((_, recall_ticks, worker_done)) = transition_state
             && is_transition_slot
         {
             if recall_ticks > 0 {
-                let scale = recall_ticks as f32 / RECALL_TICKS as f32;
-                let w = ((sprite_w as f32 * scale).round() as u16).clamp(2, sprite_w);
-                let h = ((sprite_h as f32 * scale).round() as u16).clamp(1, sprite_h);
-                let x = render_x + sprite_w.saturating_sub(w) / 2;
-                let y = render_y + sprite_h.saturating_sub(h) / 2;
-                img_area = Rect::new(x, y, w, h);
+                state_idx = 3; // Recall (Spin/Rotate fallback)
+                let elapsed = RECALL_TICKS.saturating_sub(recall_ticks);
+                frame_idx = elapsed as usize;
+                if elapsed >= RECALL_FLASH_SHRINK_DELAY_TICKS {
+                    let shrink_phase = elapsed - RECALL_FLASH_SHRINK_DELAY_TICKS;
+                    let shrink_total = (RECALL_TICKS - RECALL_FLASH_SHRINK_DELAY_TICKS).max(1);
+                    let scale = 1.0 - (shrink_phase as f32 / shrink_total as f32);
+                    let w = ((sprite_w as f32 * scale).round() as u16).clamp(2, sprite_w);
+                    let h = ((sprite_h as f32 * scale).round() as u16).clamp(1, sprite_h);
+                    let x = render_x + sprite_w.saturating_sub(w) / 2;
+                    let y = render_y + sprite_h.saturating_sub(h) / 2;
+                    img_area = Rect::new(x, y, w, h);
+                    white_flash = shrink_phase % 2 == 0;
+                }
             } else if !worker_done {
                 render_waiting_ball = true;
             }
@@ -1701,6 +1821,12 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
                     1,
                 ),
             );
+            continue;
+        }
+
+        if white_flash {
+            let flash = Block::default().style(Style::default().bg(Color::White));
+            f.render_widget(flash, img_area);
             continue;
         }
 
