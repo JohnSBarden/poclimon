@@ -14,6 +14,9 @@ pub enum ConfigError {
     #[error("Failed to parse config: {0}")]
     TomlParse(#[from] toml::de::Error),
 
+    #[error("Failed to serialize config: {0}")]
+    TomlSerialize(#[from] toml::ser::Error),
+
     #[error("Validation error: {0}")]
     Validation(String),
 }
@@ -108,11 +111,10 @@ impl GameConfig {
             // Create the default config file so the user can discover and edit it
             let default_toml = TomlConfig::default();
             if let Some(parent) = path.parent() {
-                let _ = fs::create_dir_all(parent);
+                fs::create_dir_all(parent)?;
             }
-            let content = toml::to_string_pretty(&default_toml)
-                .unwrap_or_default();
-            let _ = fs::write(&path, &content);
+            let content = toml::to_string_pretty(&default_toml)?;
+            fs::write(&path, &content)?;
             Ok(Self::default())
         }
     }
