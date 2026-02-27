@@ -108,8 +108,8 @@ pub fn parse_anim_data(xml: &str) -> HashMap<String, AnimInfo> {
 
 /// Extract the text content of a simple XML tag like `<Name>Idle</Name>`.
 fn extract_tag_value(block: &str, tag: &str) -> Option<String> {
-    let open = format!("<{}>", tag);
-    let close = format!("</{}>", tag);
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
 
     let start = block.find(&open)? + open.len();
     let end = block[start..].find(&close)? + start;

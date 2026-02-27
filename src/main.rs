@@ -74,6 +74,7 @@ const MAX_CACHED_FRAMES: usize = 8;
 /// Maximum number of simultaneous creature slots in the pen.
 /// Used to compute fixed column widths so adding a creature never
 /// shifts existing columns (which would invalidate all encoded Protocols).
+#[cfg(test)]
 const MAX_SLOTS: usize = MAX_ACTIVE_CREATURES;
 
 /// Fixed sprite render size in terminal cells. All sprites are this size
@@ -427,7 +428,7 @@ impl App {
                 }
                 Err(e) => {
                     let name = self.slots[i].creature_name.clone();
-                    self.notify(NotifLevel::Error, format!("Failed to load {}: {}", name, e));
+                    self.notify(NotifLevel::Error, format!("Failed to load {name}: {e}"));
                 }
             }
         }
@@ -769,8 +770,7 @@ fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<String>>
             .filter(|w| {
                 let w_lower = w.to_lowercase();
                 // Keep warnings that aren't about the animations we handled
-                !(eat_fallback && w_lower.contains("eat"))
-                    && !(sleep_fallback && w_lower.contains("sleep"))
+                !(eat_fallback && w_lower.contains("eat") || sleep_fallback && w_lower.contains("sleep"))
             })
             .collect()
     } else {
@@ -956,7 +956,7 @@ fn stable_velocity_to_dir(vel_x: f32, vel_y: f32, current_dir: usize) -> usize {
 /// Treats each sprite as a circle with radius = min(sprite_w, sprite_h) / 2 cells.
 /// Pushes overlapping pairs apart and reflects velocity along the collision normal.
 fn resolve_collisions(
-    slots: &mut Vec<CreatureSlot>,
+    slots: &mut [CreatureSlot],
     sprite_w: u16,
     sprite_h: u16,
     pen_w: u16,
@@ -1167,7 +1167,7 @@ fn main() -> Result<()> {
             Ok(c) => c,
             Err(e) => {
                 // TUI not yet active; eprintln! is safe here.
-                eprintln!("Warning: {} — using default", e);
+                eprintln!("Warning: {e} — using default");
                 GameConfig::default()
             }
         }
@@ -1199,7 +1199,7 @@ fn main() -> Result<()> {
 
     if let Err(e) = res {
         // TUI has been torn down; eprintln! is safe here.
-        eprintln!("Error: {}", e);
+        eprintln!("Error: {e}");
     }
 
     Ok(())
@@ -1286,7 +1286,7 @@ fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker) {
             Style::default().fg(Color::LightYellow),
         ),
         Span::styled(
-            format!(" [selected: {}]", selected_name),
+            format!(" [selected: {selected_name}]"),
             Style::default().fg(Color::DarkGray),
         ),
     ]))
@@ -1324,7 +1324,7 @@ fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker) {
     // Line 0: current creature state.
     // Lines 1–2: most recent notifications, newest first.
     let mut status_lines = vec![Line::from(vec![
-        Span::raw(format!("{}: ", selected_name)),
+        Span::raw(format!("{selected_name}: ")),
         Span::styled(state_label, Style::default().fg(status_color)),
     ])];
 
@@ -1556,6 +1556,7 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
 ///
 /// Terminal resize is a separate path: callers detect area changes and
 /// invalidate protocols explicitly via `encoded_rect`.
+#[cfg(test)]
 pub(crate) fn compute_creature_region(pen_inner: Rect, index: usize, total: usize) -> Rect {
     if total == 0 || MAX_SLOTS == 0 {
         return pen_inner;
@@ -1875,18 +1876,18 @@ mod tests {
         let mut app = make_app(&[(1, "Bulbasaur")]);
         // Fill to capacity
         for i in 0..MAX_NOTIFICATIONS {
-            app.notify(NotifLevel::Info, format!("msg {}", i));
+            app.notify(NotifLevel::Info, format!("msg {i}"));
         }
         assert_eq!(app.notifications.len(), MAX_NOTIFICATIONS);
         assert_eq!(app.notifications.front().unwrap().message, "msg 0");
 
         // Adding one more should drop "msg 0"
-        app.notify(NotifLevel::Warn, format!("msg {}", MAX_NOTIFICATIONS));
+        app.notify(NotifLevel::Warn, format!("msg {MAX_NOTIFICATIONS}"));
         assert_eq!(app.notifications.len(), MAX_NOTIFICATIONS);
         assert_eq!(app.notifications.front().unwrap().message, "msg 1");
         assert_eq!(
             app.notifications.back().unwrap().message,
-            format!("msg {}", MAX_NOTIFICATIONS)
+            format!("msg {MAX_NOTIFICATIONS}")
         );
     }
 

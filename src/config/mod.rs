@@ -122,7 +122,7 @@ impl GameConfig {
     /// Create a GameConfig from a single creature name (CLI override).
     pub fn from_creature_name(name: &str) -> Result<Self, ConfigError> {
         let creature = creatures::find_by_name(name).ok_or_else(|| {
-            ConfigError::Validation(format!("Unknown creature: '{}'", name))
+            ConfigError::Validation(format!("Unknown creature: '{name}'"))
         })?;
         Ok(Self {
             scale: 3,
@@ -136,10 +136,7 @@ impl GameConfig {
 
         if creatures.len() > MAX_ACTIVE_CREATURES {
             return Err(ConfigError::Validation(
-                format!(
-                    "Maximum {} creatures allowed in roster",
-                    MAX_ACTIVE_CREATURES
-                ),
+                format!("Maximum {MAX_ACTIVE_CREATURES} creatures allowed in roster"),
             ));
         }
 
@@ -157,19 +154,13 @@ impl GameConfig {
                     roster.push((c.id, c.name.to_string()));
                     continue;
                 }
-                return Err(ConfigError::Validation(format!(
-                    "Unknown creature ID: {}",
-                    id
-                )));
+                return Err(ConfigError::Validation(format!("Unknown creature ID: {id}")));
             }
             // Try as name
             if let Some(c) = creatures::find_by_name(entry) {
                 roster.push((c.id, c.name.to_string()));
             } else {
-                return Err(ConfigError::Validation(format!(
-                    "Unknown creature: '{}'",
-                    entry
-                )));
+                return Err(ConfigError::Validation(format!("Unknown creature: '{entry}'")));
             }
         }
 

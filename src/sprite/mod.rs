@@ -78,33 +78,6 @@ fn download_file(url: &str, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Download the AnimData.xml for a creature.
-/// Returns the path to the cached file.
-pub fn download_anim_data(creature_id: u32) -> Result<PathBuf> {
-    let cache_dir = sprite_cache_dir(creature_id)?;
-    let dest = cache_dir.join("AnimData.xml");
-
-    let pid = creatures::padded_id(creature_id);
-    let url = format!("{}/{}/AnimData.xml", SPRITECOLLAB_BASE, pid);
-
-    download_file(&url, &dest)?;
-    Ok(dest)
-}
-
-/// Download a sprite sheet for a specific animation.
-/// Returns the path to the cached PNG file.
-pub fn download_sprite_sheet(creature_id: u32, anim_name: &str) -> Result<PathBuf> {
-    let cache_dir = sprite_cache_dir(creature_id)?;
-    let filename = format!("{}-Anim.png", anim_name);
-    let dest = cache_dir.join(&filename);
-
-    let pid = creatures::padded_id(creature_id);
-    let url = format!("{}/{}/{}", SPRITECOLLAB_BASE, pid, filename);
-
-    download_file(&url, &dest)?;
-    Ok(dest)
-}
-
 /// Download all needed sprites for a creature (AnimData.xml + sprite sheets).
 ///
 /// Returns `(anim_data_path, sheets, warnings)`.
@@ -117,7 +90,7 @@ pub fn download_all_sprites(creature_id: u32) -> Result<SpriteDownloadResult> {
     let pid = creatures::padded_id(creature_id);
 
     let anim_dest = cache_dir.join("AnimData.xml");
-    let anim_url = format!("{}/{}/AnimData.xml", SPRITECOLLAB_BASE, pid);
+    let anim_url = format!("{SPRITECOLLAB_BASE}/{pid}/AnimData.xml");
     let anim_handle = thread::spawn(move || -> Result<PathBuf> {
         download_file(&anim_url, &anim_dest)?;
         Ok(anim_dest)
@@ -125,9 +98,9 @@ pub fn download_all_sprites(creature_id: u32) -> Result<SpriteDownloadResult> {
 
     let mut sheet_handles = Vec::with_capacity(NEEDED_ANIMS.len());
     for &anim_name in NEEDED_ANIMS {
-        let filename = format!("{}-Anim.png", anim_name);
+        let filename = format!("{anim_name}-Anim.png");
         let dest = cache_dir.join(&filename);
-        let url = format!("{}/{}/{}", SPRITECOLLAB_BASE, pid, filename);
+        let url = format!("{SPRITECOLLAB_BASE}/{pid}/{filename}");
         let name = anim_name.to_string();
 
         sheet_handles.push(thread::spawn(move || -> (String, Result<PathBuf>) {
@@ -148,13 +121,11 @@ pub fn download_all_sprites(creature_id: u32) -> Result<SpriteDownloadResult> {
             Ok((anim_name, Ok(path))) => sheets.push((anim_name, path)),
             Ok((anim_name, Err(e))) => {
                 warnings.push(format!(
-                    "Couldn't download {} for creature {}: {}",
-                    anim_name, creature_id, e
+                    "Couldn't download {anim_name} for creature {creature_id}: {e}"
                 ));
             }
             Err(_) => warnings.push(format!(
-                "Couldn't download sprite for creature {}: worker thread panicked",
-                creature_id
+                "Couldn't download sprite for creature {creature_id}: worker thread panicked"
             )),
         }
     }

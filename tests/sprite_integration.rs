@@ -59,8 +59,8 @@ fn test_pikachu_sprite_download_and_frame_extraction() {
     // Each frame should have the right dimensions
     for (i, frame) in frames.iter().enumerate() {
         let (w, h) = frame.dimensions();
-        assert_eq!(w, idle.frame_width, "Frame {} width mismatch", i);
-        assert_eq!(h, idle.frame_height, "Frame {} height mismatch", i);
+        assert_eq!(w, idle.frame_width, "Frame {i} width mismatch");
+        assert_eq!(h, idle.frame_height, "Frame {i} height mismatch");
     }
 
     // Clean up

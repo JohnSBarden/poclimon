@@ -19,7 +19,7 @@ pub struct CreatureDef {
 /// assert_eq!(poclimon::creatures::padded_id(146), "0146");
 /// ```
 pub fn padded_id(id: u32) -> String {
-    format!("{:04}", id)
+    format!("{id:04}")
 }
 
 /// All creatures available in PoCLImon.
