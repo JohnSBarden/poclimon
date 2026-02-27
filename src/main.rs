@@ -1293,7 +1293,7 @@ fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker) {
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title("⚡ PoCLImon v0.0.3"),
+            .title("⚡ PoCLImon v0.2.0"),
     );
     f.render_widget(title, chunks[0]);
 

@@ -2,7 +2,7 @@
 
 **A terminal-based virtual pet — Tamagotchi in your terminal!**
 
-> **Latest release: v0.1.0 (February 26, 2026)** — improved collision behavior, free pen movement, sprite size fixes, animation fallback, and directional sprites (see [Changelog](#changelog))
+> **Latest release: v0.2.0 (February 27, 2026)** — proactive multithreaded sprite fetching, strict 6-creature limit, config reliability fixes, and clippy/test hardening (see [Changelog](#changelog))
 
 > 📸 *Screenshot coming soon*
 
@@ -134,6 +134,14 @@ The `roster.creatures` array sets the starting roster. You can then use
 - Licensed under **CC BY-NC** (Creative Commons Attribution-NonCommercial)
 
 ## Changelog
+
+### v0.2.0 (2026-02-27)
+- Proactive multithreaded sprite downloads for AnimData and required sprite sheets.
+- Download hardening: `curl --fail`, connect/request timeouts, and atomic writes.
+- Unified max active roster limit to 6 in config + runtime behavior.
+- Default config creation now propagates serialization and file-write errors.
+- Integration network test is now opt-in (`#[ignore]`) and validates download status.
+- Codebase now passes `cargo clippy --all-targets --all-features -- -D warnings`.
 
 ### v0.1.0 (2026-02-26)
 - Improved collision behavior.
