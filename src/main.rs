@@ -161,6 +161,12 @@ struct SwapTransition {
     worker_result: Option<SwapWorkerResult>,
 }
 
+struct AddTransition {
+    target_name: String,
+    worker_rx: Receiver<SwapWorkerResult>,
+    worker_result: Option<SwapWorkerResult>,
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// A single creature slot in the shared-pen display.
@@ -391,6 +397,7 @@ struct App {
     /// In-TUI notification messages (replaces eprintln! during TUI operation).
     notifications: VecDeque<Notification>,
     swap_transition: Option<SwapTransition>,
+    add_transition: Option<AddTransition>,
 }
 
 impl App {
@@ -409,6 +416,7 @@ impl App {
             next_add_index: 0,
             notifications: VecDeque::new(),
             swap_transition: None,
+            add_transition: None,
         }
     }
 
@@ -463,6 +471,7 @@ impl App {
             slot.animator.tick();
         }
         self.update_swap_transition();
+        self.update_add_transition();
         self.expire_notifications(Duration::from_secs(NOTIF_TTL_SECS));
     }
 
@@ -498,14 +507,18 @@ impl App {
         self.swap_transition.as_ref().map(|t| t.slot_index)
     }
 
+    fn has_background_load(&self) -> bool {
+        self.swap_transition.is_some() || self.add_transition.is_some()
+    }
+
     /// Add the next available creature (not already in roster) to the end.
     ///
     /// Cycles through `creatures::ROSTER` in order, skipping IDs already
     /// present.  Does nothing when all creatures are already in the roster
     /// or the roster is already at the display limit (6 slots).
     fn add_creature(&mut self) {
-        if self.swap_transition.is_some() {
-            self.notify(NotifLevel::Warn, "Please wait for the current swap to finish");
+        if self.has_background_load() {
+            self.notify(NotifLevel::Warn, "Please wait for the current load to finish");
             return;
         }
         // Cap at 6 for the pen renderer.
@@ -532,30 +545,36 @@ impl App {
         let creature = &roster[idx];
         self.next_add_index = (idx + 1) % roster.len();
 
-        let mut slot = CreatureSlot::new(creature.id, creature.name.to_string());
-        match load_slot_sprites(&mut slot, self.config.scale) {
-            Ok(warnings) => {
-                for w in warnings {
-                    self.notify(NotifLevel::Warn, w);
-                }
-                // Protocol will be built on first render pass in render_pen.
-                self.slots.push(slot);
-            }
-            Err(e) => {
-                self.notify(
-                    NotifLevel::Error,
-                    format!("Failed to add {}: {}", creature.name, e),
-                );
-            }
-        }
+        let target_id = creature.id;
+        let target_name = creature.name.to_string();
+        let worker_target_name = target_name.clone();
+        let scale = self.config.scale;
+        let (tx, rx) = mpsc::channel::<SwapWorkerResult>();
+        std::thread::spawn(move || {
+            let mut slot = CreatureSlot::new(target_id, worker_target_name);
+            let msg = match load_slot_sprites(&mut slot, scale) {
+                Ok(warnings) => SwapWorkerResult::Loaded {
+                    slot: Box::new(slot),
+                    warnings,
+                },
+                Err(e) => SwapWorkerResult::Failed(e.to_string()),
+            };
+            let _ = tx.send(msg);
+        });
+
+        self.add_transition = Some(AddTransition {
+            target_name,
+            worker_rx: rx,
+            worker_result: None,
+        });
     }
 
     /// Remove the currently selected slot from the roster.
     ///
     /// Silently does nothing if the roster would drop below 1 creature.
     fn remove_selected(&mut self) {
-        if self.swap_transition.is_some() {
-            self.notify(NotifLevel::Warn, "Please wait for the current swap to finish");
+        if self.has_background_load() {
+            self.notify(NotifLevel::Warn, "Please wait for the current load to finish");
             return;
         }
         if self.slots.len() <= 1 {
@@ -620,12 +639,60 @@ impl App {
         }
     }
 
+    fn update_add_transition(&mut self) {
+        let mut post_warnings: Vec<String> = Vec::new();
+        let mut post_error: Option<String> = None;
+        let mut add_slot: Option<CreatureSlot> = None;
+
+        if let Some(transition) = self.add_transition.as_mut() {
+            if transition.worker_result.is_none()
+                && let Ok(result) = transition.worker_rx.try_recv()
+            {
+                transition.worker_result = Some(result);
+            }
+
+            if let Some(result) = transition.worker_result.take() {
+                match result {
+                    SwapWorkerResult::Loaded { slot, warnings } => {
+                        add_slot = Some(*slot);
+                        post_warnings = warnings;
+                    }
+                    SwapWorkerResult::Failed(err) => {
+                        post_error =
+                            Some(format!("Failed to add {}: {}", transition.target_name, err));
+                    }
+                }
+            }
+        }
+
+        if let Some(slot) = add_slot {
+            self.add_transition = None;
+            if self.slots.len() < MAX_ACTIVE_CREATURES {
+                self.slots.push(slot);
+            } else {
+                self.notify(
+                    NotifLevel::Warn,
+                    "Add completed but roster is already full; result dropped",
+                );
+            }
+            for warning in post_warnings {
+                self.notify(NotifLevel::Warn, warning);
+            }
+            return;
+        }
+
+        if let Some(err) = post_error {
+            self.add_transition = None;
+            self.notify(NotifLevel::Error, err);
+        }
+    }
+
     /// Cycle the creature in the selected slot through all `creatures::ROSTER`
     /// entries, wrapping around. Recall animation plays while sprites load in
     /// the background and then the slot swaps without freezing the app.
     fn cycle_selected_creature(&mut self) {
-        if self.swap_transition.is_some() {
-            self.notify(NotifLevel::Warn, "A creature swap is already in progress");
+        if self.has_background_load() {
+            self.notify(NotifLevel::Warn, "A creature load is already in progress");
             return;
         }
 
@@ -1440,9 +1507,21 @@ fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker) {
                 Style::default().fg(Color::LightMagenta),
             ),
         ]));
+    } else if let Some(transition) = app.add_transition.as_ref() {
+        status_lines.push(Line::from(vec![
+            Span::styled("[Add]   ", Style::default().fg(Color::LightMagenta)),
+            Span::styled(
+                format!("Loading {}...", transition.target_name),
+                Style::default().fg(Color::LightMagenta),
+            ),
+        ]));
     }
 
-    let notif_rows = if app.swap_transition.is_some() { 1 } else { 2 };
+    let notif_rows = if app.swap_transition.is_some() || app.add_transition.is_some() {
+        1
+    } else {
+        2
+    };
     for notif in app.notifications.iter().rev().take(notif_rows) {
         let (prefix, color) = match notif.level {
             NotifLevel::Error => ("[Error] ", Color::Red),
@@ -2115,6 +2194,29 @@ mod tests {
         app.update_swap_transition();
         assert!(app.swap_transition.is_none());
         assert_eq!(app.slots[0].creature_id, 7);
+    }
+
+    #[test]
+    fn test_add_transition_pushes_loaded_slot() {
+        let mut app = make_app(&[(1, "Bulbasaur")]);
+        let (tx, rx) = mpsc::channel();
+        let addition = CreatureSlot::new(4, "Charmander".to_string());
+        tx.send(SwapWorkerResult::Loaded {
+            slot: Box::new(addition),
+            warnings: Vec::new(),
+        })
+        .unwrap();
+
+        app.add_transition = Some(AddTransition {
+            target_name: "Charmander".to_string(),
+            worker_rx: rx,
+            worker_result: None,
+        });
+
+        app.update_add_transition();
+        assert!(app.add_transition.is_none());
+        assert_eq!(app.slots.len(), 2);
+        assert_eq!(app.slots[1].creature_id, 4);
     }
 
     // ── movement + collisions ────────────────────────────────────────────
