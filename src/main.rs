@@ -29,6 +29,7 @@ use std::fs::OpenOptions;
 use std::io;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -86,6 +87,7 @@ const LABEL_H: u16 = 3; // compact bordered plate: top border + 1 row + bottom b
 const LABEL_OVERLAP: u16 = 0; // keep readable by hugging sprite edge, not overlapping pixels
 const COLLISION_MIN_PENETRATION: f32 = 0.75;
 const OVERLAP_STACK_THRESHOLD: f32 = 0.60;
+const RECALL_TICKS: u8 = 12;
 
 /// Optional debug log sink enabled by `POCLIMON_DEBUG_LOG=/path/to/file`.
 /// Logs are append-only and intentionally low-level for render/movement triage.
@@ -141,6 +143,22 @@ struct Notification {
     message: String,
     level: NotifLevel,
     created_at: Instant,
+}
+
+enum SwapWorkerResult {
+    Loaded {
+        slot: Box<CreatureSlot>,
+        warnings: Vec<String>,
+    },
+    Failed(String),
+}
+
+struct SwapTransition {
+    slot_index: usize,
+    recall_ticks: u8,
+    target_name: String,
+    worker_rx: Receiver<SwapWorkerResult>,
+    worker_result: Option<SwapWorkerResult>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -372,6 +390,7 @@ struct App {
     next_add_index: usize,
     /// In-TUI notification messages (replaces eprintln! during TUI operation).
     notifications: VecDeque<Notification>,
+    swap_transition: Option<SwapTransition>,
 }
 
 impl App {
@@ -389,6 +408,7 @@ impl App {
             running: true,
             next_add_index: 0,
             notifications: VecDeque::new(),
+            swap_transition: None,
         }
     }
 
@@ -442,6 +462,7 @@ impl App {
         for slot in &mut self.slots {
             slot.animator.tick();
         }
+        self.update_swap_transition();
         self.expire_notifications(Duration::from_secs(NOTIF_TTL_SECS));
     }
 
@@ -473,12 +494,20 @@ impl App {
         }
     }
 
+    fn transition_slot_index(&self) -> Option<usize> {
+        self.swap_transition.as_ref().map(|t| t.slot_index)
+    }
+
     /// Add the next available creature (not already in roster) to the end.
     ///
     /// Cycles through `creatures::ROSTER` in order, skipping IDs already
     /// present.  Does nothing when all creatures are already in the roster
     /// or the roster is already at the display limit (6 slots).
     fn add_creature(&mut self) {
+        if self.swap_transition.is_some() {
+            self.notify(NotifLevel::Warn, "Please wait for the current swap to finish");
+            return;
+        }
         // Cap at 6 for the pen renderer.
         if self.slots.len() >= MAX_ACTIVE_CREATURES {
             return;
@@ -525,6 +554,10 @@ impl App {
     ///
     /// Silently does nothing if the roster would drop below 1 creature.
     fn remove_selected(&mut self) {
+        if self.swap_transition.is_some() {
+            self.notify(NotifLevel::Warn, "Please wait for the current swap to finish");
+            return;
+        }
         if self.slots.len() <= 1 {
             return;
         }
@@ -535,9 +568,67 @@ impl App {
         }
     }
 
+    /// Poll and advance an in-progress swap transition.
+    fn update_swap_transition(&mut self) {
+        let mut post_warnings: Vec<String> = Vec::new();
+        let mut post_error: Option<String> = None;
+        let mut apply_swap: Option<(usize, CreatureSlot)> = None;
+
+        if let Some(transition) = self.swap_transition.as_mut() {
+            if transition.worker_result.is_none()
+                && let Ok(result) = transition.worker_rx.try_recv()
+            {
+                transition.worker_result = Some(result);
+            }
+
+            if transition.recall_ticks > 0 {
+                transition.recall_ticks -= 1;
+            }
+
+            if transition.recall_ticks == 0
+                && let Some(result) = transition.worker_result.take()
+            {
+                match result {
+                    SwapWorkerResult::Loaded { slot, warnings } => {
+                        apply_swap = Some((transition.slot_index, *slot));
+                        post_warnings = warnings;
+                    }
+                    SwapWorkerResult::Failed(err) => {
+                        post_error = Some(format!(
+                            "Failed to swap to {}: {}",
+                            transition.target_name, err
+                        ));
+                    }
+                }
+            }
+        }
+
+        if let Some((slot_index, slot)) = apply_swap {
+            if slot_index < self.slots.len() {
+                self.slots[slot_index] = slot;
+            }
+            self.swap_transition = None;
+            for warning in post_warnings {
+                self.notify(NotifLevel::Warn, warning);
+            }
+            return;
+        }
+
+        if let Some(err) = post_error {
+            self.swap_transition = None;
+            self.notify(NotifLevel::Error, err);
+        }
+    }
+
     /// Cycle the creature in the selected slot through all `creatures::ROSTER`
-    /// entries, wrapping around. This may download and cache new sprites.
+    /// entries, wrapping around. Recall animation plays while sprites load in
+    /// the background and then the slot swaps without freezing the app.
     fn cycle_selected_creature(&mut self) {
+        if self.swap_transition.is_some() {
+            self.notify(NotifLevel::Warn, "A creature swap is already in progress");
+            return;
+        }
+
         let Some(slot) = self.slots.get(self.selected) else {
             return;
         };
@@ -549,23 +640,32 @@ impl App {
 
         let next_pos = (current_pos + 1) % roster.len();
         let next = &roster[next_pos];
+        let selected_index = self.selected;
+        let target_id = next.id;
+        let target_name = next.name.to_string();
+        let worker_target_name = target_name.clone();
+        let scale = self.config.scale;
 
-        let mut new_slot = CreatureSlot::new(next.id, next.name.to_string());
-        match load_slot_sprites(&mut new_slot, self.config.scale) {
-            Ok(warnings) => {
-                for w in warnings {
-                    self.notify(NotifLevel::Warn, w);
-                }
-                // Protocol will be built on first render pass in render_pen.
-                self.slots[self.selected] = new_slot;
-            }
-            Err(e) => {
-                self.notify(
-                    NotifLevel::Error,
-                    format!("Failed to swap to {}: {}", next.name, e),
-                );
-            }
-        }
+        let (tx, rx) = mpsc::channel::<SwapWorkerResult>();
+        std::thread::spawn(move || {
+            let mut new_slot = CreatureSlot::new(target_id, worker_target_name);
+            let msg = match load_slot_sprites(&mut new_slot, scale) {
+                Ok(warnings) => SwapWorkerResult::Loaded {
+                    slot: Box::new(new_slot),
+                    warnings,
+                },
+                Err(e) => SwapWorkerResult::Failed(e.to_string()),
+            };
+            let _ = tx.send(msg);
+        });
+
+        self.swap_transition = Some(SwapTransition {
+            slot_index: selected_index,
+            recall_ticks: RECALL_TICKS,
+            target_name,
+            worker_rx: rx,
+            worker_result: None,
+        });
     }
 }
 
@@ -1293,7 +1393,7 @@ fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker) {
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title("⚡ PoCLImon v0.2.0"),
+            .title("⚡ PoCLImon v0.2.1"),
     );
     f.render_widget(title, chunks[0]);
 
@@ -1327,8 +1427,23 @@ fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker) {
         Span::raw(format!("{selected_name}: ")),
         Span::styled(state_label, Style::default().fg(status_color)),
     ])];
+    if let Some(transition) = app.swap_transition.as_ref() {
+        let action = if transition.recall_ticks > 0 {
+            "Recalling"
+        } else {
+            "Loading"
+        };
+        status_lines.push(Line::from(vec![
+            Span::styled("[Swap]  ", Style::default().fg(Color::LightMagenta)),
+            Span::styled(
+                format!("{action} {}...", transition.target_name),
+                Style::default().fg(Color::LightMagenta),
+            ),
+        ]));
+    }
 
-    for notif in app.notifications.iter().rev().take(2) {
+    let notif_rows = if app.swap_transition.is_some() { 1 } else { 2 };
+    for notif in app.notifications.iter().rev().take(notif_rows) {
         let (prefix, color) = match notif.level {
             NotifLevel::Error => ("[Error] ", Color::Red),
             NotifLevel::Warn => ("[Warn]  ", Color::Yellow),
@@ -1376,6 +1491,11 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
     f.render_widget(block, area);
 
     let selected = app.selected;
+    let transition_slot_index = app.transition_slot_index();
+    let transition_state = app
+        .swap_transition
+        .as_ref()
+        .map(|t| (t.slot_index, t.recall_ticks, t.worker_result.is_some()));
 
     // Sprite size: fixed constants — same for all creatures regardless of pen dimensions.
     let sprite_w = SPRITE_W;
@@ -1419,7 +1539,8 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
 
         // Update position for this tick (frozen during eating/sleeping).
         // Direction is locked inside update_position when a new heading is picked.
-        let is_moving = matches!(slot.animator.state(), AnimationState::Idle);
+        let is_moving = matches!(slot.animator.state(), AnimationState::Idle)
+            && transition_slot_index != Some(i);
         slot.update_position(
             pen_inner.width,
             pen_inner.height,
@@ -1471,7 +1592,38 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
             .min(pen_inner.x + pen_inner.width.saturating_sub(sprite_w));
         let render_y = (pen_inner.y + slot.pos_y.round() as u16)
             .min(pen_inner.y + pen_inner.height.saturating_sub(sprite_stack_h(sprite_h)));
-        let img_area = Rect::new(render_x, render_y, sprite_w, sprite_h);
+        let mut img_area = Rect::new(render_x, render_y, sprite_w, sprite_h);
+
+        let is_transition_slot = transition_slot_index == Some(i);
+        let mut render_waiting_ball = false;
+        if let Some((_, recall_ticks, worker_done)) = transition_state
+            && is_transition_slot
+        {
+            if recall_ticks > 0 {
+                let scale = recall_ticks as f32 / RECALL_TICKS as f32;
+                let w = ((sprite_w as f32 * scale).round() as u16).clamp(2, sprite_w);
+                let h = ((sprite_h as f32 * scale).round() as u16).clamp(1, sprite_h);
+                let x = render_x + sprite_w.saturating_sub(w) / 2;
+                let y = render_y + sprite_h.saturating_sub(h) / 2;
+                img_area = Rect::new(x, y, w, h);
+            } else if !worker_done {
+                render_waiting_ball = true;
+            }
+        }
+
+        if render_waiting_ball {
+            f.render_widget(
+                Paragraph::new("⚪")
+                    .style(Style::default().fg(Color::LightRed)),
+                Rect::new(
+                    render_x + sprite_w.saturating_sub(3) / 2,
+                    render_y + sprite_h.saturating_sub(1) / 2,
+                    3,
+                    1,
+                ),
+            );
+            continue;
+        }
 
         match pick_protocol_index(&slot.encoded_frames, state_idx, dir_idx, frame_idx) {
             Some((picked_state, picked_dir, picked_frame)) => {
@@ -1584,6 +1736,7 @@ pub(crate) fn compute_creature_region(pen_inner: Rect, index: usize, total: usiz
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
 
     /// Build a minimal `App` with a given roster (by creature IDs) without
     /// downloading any sprites. Slots have no cached frames — that's fine for
@@ -1910,6 +2063,58 @@ mod tests {
         // Very long TTL — notifications should NOT be expired
         app.expire_notifications(Duration::from_secs(9999));
         assert_eq!(app.notifications.len(), 1);
+    }
+
+    #[test]
+    fn test_swap_transition_applies_loaded_slot_after_recall() {
+        let mut app = make_app(&[(1, "Bulbasaur")]);
+        let (tx, rx) = mpsc::channel();
+        let replacement = CreatureSlot::new(25, "Pikachu".to_string());
+        tx.send(SwapWorkerResult::Loaded {
+            slot: Box::new(replacement),
+            warnings: Vec::new(),
+        })
+        .unwrap();
+
+        app.swap_transition = Some(SwapTransition {
+            slot_index: 0,
+            recall_ticks: 1,
+            target_name: "Pikachu".to_string(),
+            worker_rx: rx,
+            worker_result: None,
+        });
+
+        app.update_swap_transition();
+        assert!(app.swap_transition.is_none());
+        assert_eq!(app.slots[0].creature_id, 25);
+    }
+
+    #[test]
+    fn test_swap_transition_waits_until_recall_ends() {
+        let mut app = make_app(&[(1, "Bulbasaur")]);
+        let (tx, rx) = mpsc::channel();
+        let replacement = CreatureSlot::new(7, "Squirtle".to_string());
+        tx.send(SwapWorkerResult::Loaded {
+            slot: Box::new(replacement),
+            warnings: Vec::new(),
+        })
+        .unwrap();
+
+        app.swap_transition = Some(SwapTransition {
+            slot_index: 0,
+            recall_ticks: 2,
+            target_name: "Squirtle".to_string(),
+            worker_rx: rx,
+            worker_result: None,
+        });
+
+        app.update_swap_transition();
+        assert!(app.swap_transition.is_some());
+        assert_eq!(app.slots[0].creature_id, 1);
+
+        app.update_swap_transition();
+        assert!(app.swap_transition.is_none());
+        assert_eq!(app.slots[0].creature_id, 7);
     }
 
     // ── movement + collisions ────────────────────────────────────────────

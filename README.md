@@ -2,7 +2,7 @@
 
 **A terminal-based virtual pet — Tamagotchi in your terminal!**
 
-> **Latest release: v0.2.0 (February 27, 2026)** — proactive multithreaded sprite fetching, strict 6-creature limit, config reliability fixes, and clippy/test hardening (see [Changelog](#changelog))
+> **Latest release: v0.2.1 (February 27, 2026)** — non-blocking creature swaps with recall animation and background sprite loading (see [Changelog](#changelog))
 
 > 📸 *Screenshot coming soon*
 
@@ -134,6 +134,12 @@ The `roster.creatures` array sets the starting roster. You can then use
 - Licensed under **CC BY-NC** (Creative Commons Attribution-NonCommercial)
 
 ## Changelog
+
+### v0.2.1 (2026-02-27)
+- Creature swap (`Tab`) no longer blocks the TUI loop.
+- Added recall-to-pokeball transition while swap loads in the background.
+- Background worker now loads the target creature sprites and applies the swap when ready.
+- Existing sprite cache behavior preserved: already-downloaded files are reused from `~/.poclimon/sprites`.
 
 ### v0.2.0 (2026-02-27)
 - Proactive multithreaded sprite downloads for AnimData and required sprite sheets.
