@@ -5,6 +5,7 @@ use poclimon::anim_data;
 use poclimon::sprite_sheet;
 
 #[test]
+#[ignore = "requires network access and curl"]
 fn test_pikachu_sprite_download_and_frame_extraction() {
     // Download AnimData.xml for Pikachu (ID 25)
     let url = "https://raw.githubusercontent.com/PMDCollab/SpriteCollab/master/sprite/0025/AnimData.xml";
@@ -12,6 +13,7 @@ fn test_pikachu_sprite_download_and_frame_extraction() {
         .args(["-sL", url])
         .output()
         .expect("curl should work");
+    assert!(output.status.success(), "AnimData download should succeed");
 
     let xml = String::from_utf8(output.stdout).expect("valid UTF-8");
     assert!(xml.contains("<AnimData>"), "Should be valid AnimData XML");
