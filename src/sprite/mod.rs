@@ -9,10 +9,14 @@ pub mod fallback;
 use crate::creatures;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 
 /// Base URL for raw files in the PMDCollab SpriteCollab repo.
 const SPRITECOLLAB_BASE: &str =
     "https://raw.githubusercontent.com/PMDCollab/SpriteCollab/master/sprite";
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The animation names we need for our virtual pet.
 const NEEDED_ANIMS: &[&str] = &["Idle", "Sleep", "Eat"];
@@ -35,32 +39,41 @@ pub fn sprite_cache_dir(creature_id: u32) -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// Download a file from a URL to a local path using curl.
+/// Download a file from a URL to a local path.
 /// Skips download if the file already exists.
 fn download_file(url: &str, dest: &Path) -> Result<()> {
     if dest.exists() {
         return Ok(());
     }
 
+    // Write atomically to avoid leaving partial files on interruption.
+    let tmp = dest.with_extension("part");
+    let connect_timeout = HTTP_CONNECT_TIMEOUT.as_secs().to_string();
+    let request_timeout = HTTP_REQUEST_TIMEOUT.as_secs().to_string();
     let output = std::process::Command::new("curl")
-        .args(["-sL", "-o"])
-        .arg(dest.as_os_str())
+        .args([
+            "-fsSL",
+            "--connect-timeout",
+            &connect_timeout,
+            "--max-time",
+            &request_timeout,
+            "-o",
+        ])
+        .arg(tmp.as_os_str())
         .arg(url)
         .output()?;
 
     if !output.status.success() {
-        anyhow::bail!(
-            "curl failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let _ = std::fs::remove_file(&tmp);
+        anyhow::bail!("curl failed for {}: {}", url, String::from_utf8_lossy(&output.stderr));
     }
 
-    // Verify the file isn't empty/tiny (likely a 404 page)
-    let metadata = std::fs::metadata(dest)?;
+    let metadata = std::fs::metadata(&tmp)?;
     if metadata.len() < 50 {
-        std::fs::remove_file(dest)?;
+        let _ = std::fs::remove_file(&tmp);
         anyhow::bail!("Downloaded file too small — likely a 404 or error");
     }
+    std::fs::rename(&tmp, dest)?;
 
     Ok(())
 }
@@ -100,19 +113,49 @@ pub fn download_sprite_sheet(creature_id: u32, anim_name: &str) -> Result<PathBu
 ///   downloaded (e.g., a missing sheet); the caller displays these via
 ///   the in-TUI notification system rather than writing to stderr.
 pub fn download_all_sprites(creature_id: u32) -> Result<SpriteDownloadResult> {
-    let anim_data_path = download_anim_data(creature_id)?;
+    let cache_dir = sprite_cache_dir(creature_id)?;
+    let pid = creatures::padded_id(creature_id);
+
+    let anim_dest = cache_dir.join("AnimData.xml");
+    let anim_url = format!("{}/{}/AnimData.xml", SPRITECOLLAB_BASE, pid);
+    let anim_handle = thread::spawn(move || -> Result<PathBuf> {
+        download_file(&anim_url, &anim_dest)?;
+        Ok(anim_dest)
+    });
+
+    let mut sheet_handles = Vec::with_capacity(NEEDED_ANIMS.len());
+    for &anim_name in NEEDED_ANIMS {
+        let filename = format!("{}-Anim.png", anim_name);
+        let dest = cache_dir.join(&filename);
+        let url = format!("{}/{}/{}", SPRITECOLLAB_BASE, pid, filename);
+        let name = anim_name.to_string();
+
+        sheet_handles.push(thread::spawn(move || -> (String, Result<PathBuf>) {
+            let result = download_file(&url, &dest).map(|_| dest);
+            (name, result)
+        }));
+    }
+
+    let anim_data_path = match anim_handle.join() {
+        Ok(result) => result?,
+        Err(_) => anyhow::bail!("AnimData download worker panicked"),
+    };
 
     let mut sheets = Vec::new();
     let mut warnings = Vec::new();
-    for &anim_name in NEEDED_ANIMS {
-        match download_sprite_sheet(creature_id, anim_name) {
-            Ok(path) => sheets.push((anim_name.to_string(), path)),
-            Err(e) => {
+    for handle in sheet_handles {
+        match handle.join() {
+            Ok((anim_name, Ok(path))) => sheets.push((anim_name, path)),
+            Ok((anim_name, Err(e))) => {
                 warnings.push(format!(
                     "Couldn't download {} for creature {}: {}",
                     anim_name, creature_id, e
                 ));
             }
+            Err(_) => warnings.push(format!(
+                "Couldn't download sprite for creature {}: worker thread panicked",
+                creature_id
+            )),
         }
     }
 
