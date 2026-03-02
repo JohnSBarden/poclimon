@@ -83,7 +83,7 @@ const MAX_SLOTS: usize = MAX_ACTIVE_CREATURES;
 const SPRITE_W: u16 = 32;
 const SPRITE_H: u16 = 10; // was 16 — tighter area, label sits close to sprite
 
-const LABEL_H: u16 = 3; // compact bordered plate: top border + 1 row + bottom border
+const LABEL_H: u16 = 4; // top border + 2 content rows + bottom border
 const LABEL_OVERLAP: u16 = 0; // keep readable by hugging sprite edge, not overlapping pixels
 const COLLISION_MIN_PENETRATION: f32 = 0.75;
 const OVERLAP_STACK_THRESHOLD: f32 = 0.60;
@@ -391,18 +391,33 @@ impl CreatureSlot {
     }
 }
 
+/// Which prompt dialog is currently showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromptMode {
+    /// No prompt — normal gameplay.
+    None,
+    /// "Add a Pokémon" prompt — typing Pokédex number.
+    Add,
+    /// "Swap selected Pokémon" prompt — typing Pokédex number.
+    Swap,
+}
+
 struct App {
     config: GameConfig,
     slots: Vec<CreatureSlot>,
     selected: usize,
     running: bool,
-    /// Index into `creatures::ROSTER` used by the `A` key to track
-    /// the next creature to add (so it cycles rather than repeating).
+    /// Index into `creatures::ROSTER` used by the `A` key (old cycle behavior).
+    #[allow(dead_code)]
     next_add_index: usize,
     /// In-TUI notification messages (replaces eprintln! during TUI operation).
     notifications: VecDeque<Notification>,
     swap_transition: Option<SwapTransition>,
     add_transition: Option<AddTransition>,
+    /// What kind of text prompt is currently active (if any).
+    prompt_mode: PromptMode,
+    /// Characters typed so far in the active prompt.
+    prompt_buffer: String,
 }
 
 impl App {
@@ -422,6 +437,8 @@ impl App {
             notifications: VecDeque::new(),
             swap_transition: None,
             add_transition: None,
+            prompt_mode: PromptMode::None,
+            prompt_buffer: String::new(),
         }
     }
 
@@ -521,6 +538,7 @@ impl App {
     /// Cycles through `creatures::ROSTER` in order, skipping IDs already
     /// present.  Does nothing when all creatures are already in the roster
     /// or the roster is already at the display limit (6 slots).
+    #[allow(dead_code)]
     fn add_creature(&mut self) {
         if self.has_background_load() {
             self.notify(NotifLevel::Warn, "Please wait for the current load to finish");
@@ -695,6 +713,7 @@ impl App {
     /// Cycle the creature in the selected slot through all `creatures::ROSTER`
     /// entries, wrapping around. Recall animation plays while sprites load in
     /// the background and then the slot swaps without freezing the app.
+    #[allow(dead_code)]
     fn cycle_selected_creature(&mut self) {
         if self.has_background_load() {
             self.notify(NotifLevel::Warn, "A creature load is already in progress");
@@ -731,6 +750,60 @@ impl App {
             let _ = tx.send(msg);
         });
 
+        self.swap_transition = Some(SwapTransition {
+            slot_index: selected_index,
+            recall_ticks: RECALL_TICKS,
+            target_name,
+            worker_rx: rx,
+            worker_result: None,
+        });
+    }
+
+    /// Add a creature by National Pokédex number.
+    /// Looks up the name from FULL_DEX, then starts a background sprite load.
+    fn add_creature_by_dex(&mut self, id: u32) {
+        if self.slots.len() >= MAX_ACTIVE_CREATURES {
+            self.notify(NotifLevel::Warn, "Pen is full — remove a creature first");
+            return;
+        }
+        let Some(name) = creatures::lookup_name(id) else {
+            self.notify(NotifLevel::Warn, format!("#{id} is not a known Pokémon"));
+            return;
+        };
+        let target_name = name.to_string();
+        let worker_name = target_name.clone();
+        let scale = self.config.scale;
+        let (tx, rx) = mpsc::channel::<SwapWorkerResult>();
+        std::thread::spawn(move || {
+            let mut slot = CreatureSlot::new(id, worker_name);
+            let msg = match load_slot_sprites(&mut slot, scale) {
+                Ok(warnings) => SwapWorkerResult::Loaded { slot: Box::new(slot), warnings },
+                Err(e) => SwapWorkerResult::Failed(e.to_string()),
+            };
+            let _ = tx.send(msg);
+        });
+        self.add_transition = Some(AddTransition { target_name, worker_rx: rx, worker_result: None });
+    }
+
+    /// Swap the selected creature to a new Pokémon by National Pokédex number.
+    fn swap_selected_to_dex(&mut self, id: u32) {
+        let Some(name) = creatures::lookup_name(id) else {
+            self.notify(NotifLevel::Warn, format!("#{id} is not a known Pokémon"));
+            return;
+        };
+        let selected_index = self.selected;
+        let target_name = name.to_string();
+        let worker_name = target_name.clone();
+        let scale = self.config.scale;
+        let (tx, rx) = mpsc::channel::<SwapWorkerResult>();
+        std::thread::spawn(move || {
+            let mut new_slot = CreatureSlot::new(id, worker_name);
+            let msg = match load_slot_sprites(&mut new_slot, scale) {
+                Ok(warnings) => SwapWorkerResult::Loaded { slot: Box::new(new_slot), warnings },
+                Err(e) => SwapWorkerResult::Failed(e.to_string()),
+            };
+            let _ = tx.send(msg);
+        });
         self.swap_transition = Some(SwapTransition {
             slot_index: selected_index,
             recall_ticks: RECALL_TICKS,
@@ -1502,6 +1575,40 @@ fn run_app(
             }) = event::read()?
         {
             match code {
+                // ── Prompt intercept — handles all keys when a prompt is open ──
+                _ if app.prompt_mode != PromptMode::None => {
+                    match code {
+                        KeyCode::Esc => {
+                            app.prompt_mode = PromptMode::None;
+                            app.prompt_buffer.clear();
+                        }
+                        KeyCode::Enter => {
+                            let buf = app.prompt_buffer.trim().to_string();
+                            let mode = app.prompt_mode;
+                            app.prompt_mode = PromptMode::None;
+                            app.prompt_buffer.clear();
+                            if let Ok(id) = buf.parse::<u32>() {
+                                match mode {
+                                    PromptMode::Add  => app.add_creature_by_dex(id),
+                                    PromptMode::Swap => app.swap_selected_to_dex(id),
+                                    PromptMode::None => {}
+                                }
+                            } else {
+                                app.notify(NotifLevel::Warn, "Invalid Pokédex number — enter digits only");
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            app.prompt_buffer.pop();
+                        }
+                        KeyCode::Char(c) if c.is_ascii_digit() => {
+                            if app.prompt_buffer.len() < 4 {
+                                app.prompt_buffer.push(c);
+                            }
+                        }
+                        _ => {} // ignore other keys while prompt is active
+                    }
+                }
+                // ── Normal game controls ───────────────────────────────────────
                 KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
                     app.running = false;
                 }
@@ -1515,13 +1622,23 @@ fn run_app(
                     app.set_selected_state(AnimationState::Idle);
                 }
                 KeyCode::Char('a') | KeyCode::Char('A') => {
-                    app.add_creature();
+                    if app.has_background_load() {
+                        app.notify(NotifLevel::Warn, "Please wait for the current load to finish");
+                    } else if app.slots.len() < MAX_ACTIVE_CREATURES {
+                        app.prompt_mode = PromptMode::Add;
+                        app.prompt_buffer.clear();
+                    }
                 }
                 KeyCode::Char('r') | KeyCode::Char('R') => {
                     app.remove_selected();
                 }
                 KeyCode::Tab => {
-                    app.cycle_selected_creature();
+                    if app.has_background_load() {
+                        app.notify(NotifLevel::Warn, "A creature load is already in progress");
+                    } else {
+                        app.prompt_mode = PromptMode::Swap;
+                        app.prompt_buffer.clear();
+                    }
                 }
                 KeyCode::Right => app.select_next(),
                 KeyCode::Left => app.select_prev(),
@@ -1650,11 +1767,52 @@ fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker) {
 
     // Help bar
     let help = Paragraph::new(
-        "[E]at  [S]leep  [I]dle  [←/→]Select  [1-6]Slot  [A]dd  [R]emove  [Tab]Swap  [Q]uit",
+        "[E]at [S]leep [I]dle [←/→] [1-6] [A]dd # [Tab]Swap # [R]emove [Q]uit",
     )
     .style(Style::default().fg(Color::DarkGray))
     .block(Block::default().borders(Borders::ALL));
     f.render_widget(help, chunks[3]);
+
+    // Prompt overlay — appears centered over the pen area when Add or Swap is active.
+    if app.prompt_mode != PromptMode::None {
+        let title = match app.prompt_mode {
+            PromptMode::Add  => " Add Pokémon ",
+            PromptMode::Swap => " Swap to Pokémon ",
+            PromptMode::None => "",
+        };
+        // Small centered popup: 32 wide, 4 tall.
+        let popup_w = 32u16;
+        let popup_h = 4u16;
+        let popup_x = chunks[1].x + (chunks[1].width.saturating_sub(popup_w)) / 2;
+        let popup_y = chunks[1].y + (chunks[1].height.saturating_sub(popup_h)) / 2;
+        let popup_area = Rect::new(popup_x, popup_y, popup_w, popup_h);
+
+        // Clear background (overwrite pen content in this area).
+        f.render_widget(ratatui::widgets::Clear, popup_area);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .border_style(Style::default().fg(Color::Yellow));
+        let inner = block.inner(popup_area);
+        f.render_widget(block, popup_area);
+
+        // Line 1: input field.
+        let input_text = format!("Pokédex #: {}█", app.prompt_buffer);
+        let row1 = Rect::new(inner.x, inner.y, inner.width, 1);
+        f.render_widget(
+            Paragraph::new(input_text).style(Style::default().fg(Color::White)),
+            row1,
+        );
+
+        // Line 2: hint.
+        let row2 = Rect::new(inner.x, inner.y + 1, inner.width, 1);
+        f.render_widget(
+            Paragraph::new("[Enter] confirm  [Esc] cancel")
+                .style(Style::default().fg(Color::DarkGray)),
+            row2,
+        );
+    }
 }
 
 // ── Shared pen rendering ───────────────────────────────────────────────────────
@@ -1877,29 +2035,45 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
             .min(pen_inner.y + pen_inner.height.saturating_sub(sprite_stack_h(sprite_h)));
 
         let is_selected = selected == i;
-        let selected_prefix = if is_selected { "◉ " } else { "" };
-        let label_text = format!(
-            "{}{} Lv.1",
-            selected_prefix,
+
+        // Build name and level display strings.
+        let name_display = format!(
+            "{} {}",
+            if is_selected { "◉" } else { " " },
             slot.creature_name.to_uppercase()
         );
-        let label_w = (label_text.chars().count() as u16 + 2).clamp(8, sprite_w);
+        let level_display = {
+            let icon = match slot.animator.state() {
+                AnimationState::Idle => "",
+                AnimationState::Eating => "🍖",
+                AnimationState::Sleeping => "💤",
+            };
+            format!("Lv.1 {icon}")
+        };
+
+        // Auto-size width to content, clamped to [8, SPRITE_W].
+        let content_w = name_display.chars().count().max(level_display.chars().count()) as u16;
+        let label_w = (content_w + 2).min(SPRITE_W).max(8); // +2 for left/right borders
+
         let label_x = render_x + (sprite_w.saturating_sub(label_w) / 2);
         let label_y = render_y + sprite_h.saturating_sub(LABEL_OVERLAP);
 
         if label_y + LABEL_H <= pen_inner.y + pen_inner.height {
             let label_area = Rect::new(label_x, label_y, label_w, LABEL_H);
-            let label_color = if is_selected {
-                Color::Yellow
-            } else {
-                Color::Gray
-            };
+            let name_color = if is_selected { Color::Yellow } else { Color::White };
             let block = Block::default().borders(Borders::ALL);
             let inner = block.inner(label_area);
             f.render_widget(block, label_area);
+
+            let row1 = Rect::new(inner.x, inner.y, inner.width, 1);
+            let row2 = Rect::new(inner.x, inner.y + 1, inner.width, 1);
             f.render_widget(
-                Paragraph::new(label_text).style(Style::default().fg(label_color)),
-                Rect::new(inner.x, inner.y, inner.width, 1),
+                Paragraph::new(name_display).style(Style::default().fg(name_color)),
+                row1,
+            );
+            f.render_widget(
+                Paragraph::new(level_display).style(Style::default().fg(Color::DarkGray)),
+                row2,
             );
         }
     }
