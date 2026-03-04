@@ -1,5 +1,5 @@
 # PoCLImon Configuration (example)
-# Copy to ~/.poclimon/config.toml to use as default
+# Copy to ~/.config/poclimon.toml to use as default
 
 [display]
 # Scale multiplier for sprites (default 3 since v0.0.3; was 6 in v0.0.2)

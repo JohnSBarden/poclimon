@@ -1,7 +1,15 @@
 [package]
 name = "poclimon"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
+description = "A terminal-based creature virtual pet"
+authors = ["John Barden"]
+license = "MIT"
+repository = "https://github.com/JohnSBarden/poclimon"
+homepage = "https://github.com/JohnSBarden/poclimon"
+readme = "README.md"
+keywords = ["terminal", "tui", "game", "pokemon", "pet"]
+categories = ["games", "command-line-utilities"]
 
 [[bin]]
 name = "poclimon"

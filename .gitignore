@@ -18,3 +18,5 @@ Cargo.lock
 
 # PoCLImon runtime
 .poclimon/
+CLAUDE.md
+docs/local/*

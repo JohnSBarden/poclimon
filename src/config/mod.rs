@@ -38,7 +38,9 @@ pub struct DisplayConfig {
 
 impl Default for DisplayConfig {
     fn default() -> Self {
-        Self { scale: default_scale() }
+        Self {
+            scale: default_scale(),
+        }
     }
 }
 
@@ -65,8 +67,6 @@ fn default_creatures() -> Vec<String> {
         "bulbasaur".to_string(),
         "charmander".to_string(),
         "squirtle".to_string(),
-        "pikachu".to_string(),
-        "eevee".to_string(),
     ]
 }
 
@@ -101,7 +101,7 @@ impl GameConfig {
         Self::from_toml(toml_config)
     }
 
-    /// Load from the default config path (~/.poclimon/config.toml).
+    /// Load from the default config path (~/.config/poclimon.toml).
     /// Creates a default config file if it doesn't exist.
     pub fn load_default() -> Result<Self, ConfigError> {
         let path = default_config_path();
@@ -121,9 +121,8 @@ impl GameConfig {
 
     /// Create a GameConfig from a single creature name (CLI override).
     pub fn from_creature_name(name: &str) -> Result<Self, ConfigError> {
-        let creature = creatures::find_by_name(name).ok_or_else(|| {
-            ConfigError::Validation(format!("Unknown creature: '{name}'"))
-        })?;
+        let creature = creatures::find_by_name(name)
+            .ok_or_else(|| ConfigError::Validation(format!("Unknown creature: '{name}'")))?;
         Ok(Self {
             scale: 3,
             roster: vec![(creature.id, creature.name.to_string())],
@@ -135,9 +134,9 @@ impl GameConfig {
         let creatures = &toml.roster.creatures;
 
         if creatures.len() > MAX_ACTIVE_CREATURES {
-            return Err(ConfigError::Validation(
-                format!("Maximum {MAX_ACTIVE_CREATURES} creatures allowed in roster"),
-            ));
+            return Err(ConfigError::Validation(format!(
+                "Maximum {MAX_ACTIVE_CREATURES} creatures allowed in roster"
+            )));
         }
 
         if creatures.is_empty() {
@@ -154,13 +153,17 @@ impl GameConfig {
                     roster.push((c.id, c.name.to_string()));
                     continue;
                 }
-                return Err(ConfigError::Validation(format!("Unknown creature ID: {id}")));
+                return Err(ConfigError::Validation(format!(
+                    "Unknown creature ID: {id}"
+                )));
             }
             // Try as name
             if let Some(c) = creatures::find_by_name(entry) {
                 roster.push((c.id, c.name.to_string()));
             } else {
-                return Err(ConfigError::Validation(format!("Unknown creature: '{entry}'")));
+                return Err(ConfigError::Validation(format!(
+                    "Unknown creature: '{entry}'"
+                )));
             }
         }
 
@@ -176,7 +179,7 @@ pub fn default_config_path() -> PathBuf {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".poclimon").join("config.toml")
+    home.join(".config").join("poclimon.toml")
 }
 
 #[cfg(test)]
@@ -295,7 +298,9 @@ creatures = ["pikachu", "eevee", "bulbasaur", "charmander", "squirtle", "pikachu
 
     #[test]
     fn test_new_creatures_by_name() {
-        for name in &["vaporeon", "jolteon", "flareon", "articuno", "zapdos", "moltres"] {
+        for name in &[
+            "vaporeon", "jolteon", "flareon", "articuno", "zapdos", "moltres",
+        ] {
             let config = GameConfig::from_creature_name(name).unwrap();
             assert_eq!(config.roster.len(), 1);
         }

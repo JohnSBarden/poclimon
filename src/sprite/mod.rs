@@ -1,7 +1,7 @@
 //! Sprite downloading and caching.
 //!
 //! Downloads sprite sheets and AnimData.xml from the PMDCollab SpriteCollab
-//! repository on GitHub. Files are cached locally in ~/.poclimon/sprites/{id}/
+//! repository on GitHub. Files are cached locally in ~/.config/poclimon/sprites/{id}/
 //! so we only download once per creature.
 
 pub mod fallback;
@@ -32,7 +32,8 @@ pub fn sprite_cache_dir(creature_id: u32) -> Result<PathBuf> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
     let dir = home
-        .join(".poclimon")
+        .join(".config")
+        .join("poclimon")
         .join("sprites")
         .join(creatures::padded_id(creature_id));
     std::fs::create_dir_all(&dir)?;
@@ -65,7 +66,11 @@ fn download_file(url: &str, dest: &Path) -> Result<()> {
 
     if !output.status.success() {
         let _ = std::fs::remove_file(&tmp);
-        anyhow::bail!("curl failed for {}: {}", url, String::from_utf8_lossy(&output.stderr));
+        anyhow::bail!(
+            "curl failed for {}: {}",
+            url,
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     let metadata = std::fs::metadata(&tmp)?;
