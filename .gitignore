@@ -18,5 +18,8 @@ Cargo.lock
 
 # PoCLImon runtime
 .poclimon/
+
+# AI stuff
 CLAUDE.md
-docs/local/*
+.claude/
+docs/local/
