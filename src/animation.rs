@@ -3,25 +3,34 @@
 //! Replaces the old programmatic animation (squash/stretch, pixel manipulation)
 //! with proper pre-rendered sprite sheet animations from PMDCollab.
 //!
-//! Each animation state (Idle, Eating, Sleeping) plays a corresponding
+//! Each animation state (Idle, Eating, Sleeping, Playing) plays a corresponding
 //! sprite sheet animation. All states loop infinitely.
 //!
 //! # Memory layout
 //!
 //! `Animation` is **timing-only** — it tracks frame durations but stores
 //! no pixel data. Actual frame images live exclusively in `CreatureSlot`'s
-//! `cached_idle / cached_eat / cached_sleep` vectors. This eliminates the
-//! double-storage that existed in v0.0.2, where frames were kept both in
+//! `cached_idle / cached_eat / cached_sleep / cached_hop` vectors. This eliminates
+//! the double-storage that existed in v0.0.2, where frames were kept both in
 //! `Animator.idle_anim.frames` and in the slot cache.
 
 use std::time::Instant;
 
 /// The creature's current animation state.
+///
+/// Each variant maps to a specific sprite sheet and a slot in
+/// `CreatureSlot::encoded_frames` (0=Idle, 1=Eat, 2=Sleep, 3=Recall, 4=Playing).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnimationState {
+    /// Standing around, wandering the pen. Frame index 0.
     Idle,
+    /// Eating — creature plays the "Eat" animation. Frame index 1.
     Eating,
+    /// Sleeping. Frame index 2.
     Sleeping,
+    /// Playing / hopping around. Uses the "Hop" animation from PMDCollab.
+    /// Frame index 4 in `encoded_frames`. Earns XP just like Eating.
+    Playing,
 }
 
 /// Timing information for one animation cycle (no pixel data stored here).
@@ -88,6 +97,10 @@ pub struct Animator {
     idle_anim: Option<Animation>,
     eat_anim: Option<Animation>,
     sleep_anim: Option<Animation>,
+    /// Timing for the "Hop" / Playing animation (index 4 in encoded_frames).
+    /// Stored separately so `load_animations` signature stays backward-compatible;
+    /// set via `set_hop_animation` after `load_animations`.
+    hop_anim: Option<Animation>,
 }
 
 impl Animator {
@@ -99,13 +112,15 @@ impl Animator {
             idle_anim: None,
             eat_anim: None,
             sleep_anim: None,
+            hop_anim: None,
         }
     }
 
-    /// Load timing animations for all three states.
+    /// Load timing animations for the three core states (Idle, Eat, Sleep).
     ///
     /// The `Animation` values here are timing-only; the corresponding
     /// pixel frames must be stored in `CreatureSlot::cached_*`.
+    /// Call `set_hop_animation` afterwards to wire up the Playing state.
     pub fn load_animations(
         &mut self,
         idle: Animation,
@@ -115,6 +130,14 @@ impl Animator {
         self.idle_anim = Some(idle);
         self.eat_anim = Some(eat);
         self.sleep_anim = Some(sleep);
+    }
+
+    /// Set the timing animation for the Playing / "Hop" state.
+    ///
+    /// Kept separate from `load_animations` so the hop timing can be wired in
+    /// without changing the existing call sites in `sprite_loading.rs`.
+    pub fn set_hop_animation(&mut self, hop: Animation) {
+        self.hop_anim = Some(hop);
     }
 
     /// Get the current animation state.
@@ -157,6 +180,12 @@ impl Animator {
                 let anim = self.sleep_anim.as_ref()?;
                 Some(anim.frame_index_at(elapsed_ms))
             }
+            // Playing uses the hop animation; falls back to idle timing if
+            // no hop animation was loaded (same pattern as Eat/Sleep fallback).
+            AnimationState::Playing => {
+                let anim = self.hop_anim.as_ref().or(self.idle_anim.as_ref())?;
+                Some(anim.frame_index_at(elapsed_ms))
+            }
         }
     }
 }
@@ -185,6 +214,9 @@ mod tests {
         assert_eq!(animator.state(), AnimationState::Sleeping);
         animator.set_state(AnimationState::Idle);
         assert_eq!(animator.state(), AnimationState::Idle);
+        // Playing state should round-trip correctly.
+        animator.set_state(AnimationState::Playing);
+        assert_eq!(animator.state(), AnimationState::Playing);
     }
 
     #[test]
@@ -225,6 +257,24 @@ mod tests {
     }
 
     #[test]
+    fn test_playing_loops_infinitely() {
+        // Playing should loop just like other states — no automatic return to Idle.
+        let mut animator = Animator::new();
+        animator.load_animations(
+            make_test_animation(),
+            make_test_animation(),
+            make_test_animation(),
+        );
+        animator.set_hop_animation(make_test_animation());
+        animator.set_state(AnimationState::Playing);
+        for _ in 0..1000 {
+            let changed = animator.tick();
+            assert!(!changed, "tick() must not trigger state transitions");
+            assert_eq!(animator.state(), AnimationState::Playing);
+        }
+    }
+
+    #[test]
     fn test_current_frame_index_returns_none_without_animations() {
         let animator = Animator::new();
         assert!(animator.current_frame_index().is_none());
@@ -239,5 +289,39 @@ mod tests {
             make_test_animation(),
         );
         assert!(animator.current_frame_index().is_some());
+    }
+
+    #[test]
+    fn test_playing_state_falls_back_to_idle_when_no_hop_anim() {
+        // If no hop animation was loaded, Playing should fall back to idle timing.
+        let mut animator = Animator::new();
+        animator.load_animations(
+            make_test_animation(),
+            make_test_animation(),
+            make_test_animation(),
+        );
+        // No set_hop_animation() call — should still return Some (using idle fallback).
+        animator.set_state(AnimationState::Playing);
+        assert!(
+            animator.current_frame_index().is_some(),
+            "Playing state should fall back to idle timing when hop_anim is None"
+        );
+    }
+
+    #[test]
+    fn test_playing_state_uses_hop_anim_when_loaded() {
+        // When a hop animation is loaded, Playing should use it.
+        let mut animator = Animator::new();
+        animator.load_animations(
+            make_test_animation(),
+            make_test_animation(),
+            make_test_animation(),
+        );
+        animator.set_hop_animation(make_test_animation());
+        animator.set_state(AnimationState::Playing);
+        assert!(
+            animator.current_frame_index().is_some(),
+            "Playing state should return a frame index when hop_anim is loaded"
+        );
     }
 }

@@ -139,6 +139,9 @@ fn run_app(
                 KeyCode::Char('i') | KeyCode::Char('I') => {
                     app.set_selected_state(animation::AnimationState::Idle);
                 }
+                KeyCode::Char('p') | KeyCode::Char('P') => {
+                    app.set_selected_state(animation::AnimationState::Playing);
+                }
                 KeyCode::Char('a') | KeyCode::Char('A') => {
                     if app.has_background_load() {
                         app.notify(

@@ -59,6 +59,7 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
             AnimationState::Idle => "Idle",
             AnimationState::Eating => "Nomming 🍖",
             AnimationState::Sleeping => "Sleeping 💤",
+            AnimationState::Playing => "Playing 🧸",
         })
         .unwrap_or("—");
     let status_color = app
@@ -68,6 +69,8 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
             AnimationState::Idle => Color::Green,
             AnimationState::Eating => Color::Yellow,
             AnimationState::Sleeping => Color::Blue,
+            // Magenta distinguishes Playing from other states at a glance.
+            AnimationState::Playing => Color::Magenta,
         })
         .unwrap_or(Color::White);
 
@@ -136,7 +139,7 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
 
     // Help bar
     let help =
-        Paragraph::new("[E]at [S]leep [I]dle [←/→] [1-6] [A]dd # [Tab]Swap # [R]emove [Q]uit")
+        Paragraph::new("[E]at [S]leep [I]dle [P]lay [←/→] [1-6] [A]dd # [Tab]Swap # [R]emove [Q]uit")
             .style(Style::default().fg(Color::DarkGray))
             .block(Block::default().borders(Borders::ALL));
     f.render_widget(help, chunks[3]);
@@ -306,10 +309,14 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
 
         let state = slot.animator.state();
         let mut frame_idx = slot.animator.current_frame_index().unwrap_or(0);
+        // Map AnimationState → encoded_frames index.
+        // Must stay in sync with the order in encode_all_frames:
+        //   0=Idle, 1=Eat, 2=Sleep, 3=Recall, 4=Playing.
         let mut state_idx = match state {
             AnimationState::Idle => 0,
             AnimationState::Eating => 1,
             AnimationState::Sleeping => 2,
+            AnimationState::Playing => 4,
         };
         let dir_idx = slot.current_dir;
 
@@ -426,13 +433,24 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
             if is_selected { "◉" } else { " " },
             slot.creature_name.to_uppercase()
         );
+        // Row 2: show level + XP progress when in an active (XP-earning or
+        // sleeping) state; just the level when Idle (no XP accrues while Idle).
         let level_display = {
-            let icon = match slot.animator.state() {
-                AnimationState::Idle => "",
-                AnimationState::Eating => "🍖",
-                AnimationState::Sleeping => "💤",
-            };
-            format!("Lv.1 {icon}")
+            let threshold = 50 * slot.level;
+            match slot.animator.state() {
+                // Idle: just show level — no XP bar since XP doesn't accrue.
+                AnimationState::Idle => format!("Lv.{}", slot.level),
+                // Active states: show level, XP progress, and emoji icon.
+                AnimationState::Eating => {
+                    format!("Lv.{}  {}/{}xp  🍖", slot.level, slot.xp, threshold)
+                }
+                AnimationState::Sleeping => {
+                    format!("Lv.{}  {}/{}xp  💤", slot.level, slot.xp, threshold)
+                }
+                AnimationState::Playing => {
+                    format!("Lv.{}  {}/{}xp  🧸", slot.level, slot.xp, threshold)
+                }
+            }
         };
 
         // Auto-size width to content, clamped to [8, SPRITE_W].
@@ -484,8 +502,10 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
 /// 2) any frame in requested state+dir
 /// 3) any direction in requested state
 /// 4) any direction in Idle state
+///
+/// The array has 5 states: 0=Idle, 1=Eat, 2=Sleep, 3=Recall, 4=Playing.
 fn pick_protocol_index(
-    encoded: &[[Vec<Option<Protocol>>; 4]; 4],
+    encoded: &[[Vec<Option<Protocol>>; 4]; 5],
     state_idx: usize,
     dir_idx: usize,
     frame_idx: usize,

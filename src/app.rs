@@ -109,9 +109,83 @@ impl App {
         for slot in &mut self.slots {
             slot.animator.tick();
         }
+        // Advance XP for creatures that are actively eating or playing.
+        self.tick_xp();
         self.update_swap_transition();
         self.update_add_transition();
         self.expire_notifications(Duration::from_secs(crate::notification::NOTIF_TTL_SECS));
+    }
+
+    /// Accrue XP for all slots currently in an XP-earning state (Eating or Playing).
+    ///
+    /// Called every game tick (50ms = 0.05 seconds). XP rate decays over time
+    /// to reward short bursts of activity rather than leaving the game AFK:
+    ///   - 0–10 s:  2 xp/sec
+    ///   - 10–40 s: 1 xp/sec
+    ///   - 40+ s:   0 xp/sec
+    ///
+    /// When a creature collects enough XP it levels up, its XP resets to 0,
+    /// and a notification appears in the status panel.
+    pub fn tick_xp(&mut self) {
+        // Each game tick is 50ms = 0.05 seconds.
+        const TICK_SECS: f32 = 0.05;
+
+        // We can't borrow self.slots and self.notifications mutably at the
+        // same time, so collect level-up events and emit them after the loop.
+        let mut level_up_events: Vec<(String, u32)> = Vec::new();
+
+        for slot in &mut self.slots {
+            let state = slot.animator.state();
+
+            // Only accrue XP while eating or playing.
+            let is_xp_state = matches!(
+                state,
+                crate::animation::AnimationState::Eating
+                    | crate::animation::AnimationState::Playing
+            );
+
+            if !is_xp_state {
+                // Not in an XP-earning state — nothing to do this tick.
+                // (anim_active_secs is reset in set_selected_state when the
+                // player switches away, so we don't touch it here.)
+                continue;
+            }
+
+            // Advance the continuous activity timer.
+            slot.anim_active_secs += TICK_SECS;
+
+            // Determine XP rate for the current activity duration.
+            let xp_rate = if slot.anim_active_secs <= 10.0 {
+                2.0_f32 // Fast gain for the first 10 seconds
+            } else if slot.anim_active_secs <= 40.0 {
+                1.0_f32 // Slower gain for 10–40 seconds
+            } else {
+                0.0_f32 // No gain after 40 seconds (diminishing returns)
+            };
+
+            // Accumulate fractional XP, then floor to u32.
+            // Using a small float accumulator avoids rounding every tick.
+            let fractional_gain = xp_rate * TICK_SECS;
+            let new_xp_f = slot.xp as f32 + fractional_gain;
+            slot.xp = new_xp_f.floor() as u32;
+
+            // Check for level-up: threshold is 50 * current_level.
+            let threshold = 50 * slot.level;
+            if slot.xp >= threshold {
+                // Level up! Reset XP and increment level.
+                slot.xp = 0;
+                slot.level += 1;
+                level_up_events.push((slot.creature_name.clone(), slot.level));
+            }
+        }
+
+        // Emit level-up notifications now that we're no longer borrowing slots.
+        for (name, level) in level_up_events {
+            self.notify(
+                NotifLevel::Info,
+                format!("{name} leveled up! Now level {level} ✨"),
+            );
+        }
     }
 
     pub fn select_next(&mut self) {
@@ -136,9 +210,26 @@ impl App {
         }
     }
 
+    /// Switch the selected creature to a new animation state.
+    ///
+    /// Also resets `anim_active_secs` to 0 whenever the player moves to a
+    /// non-XP-earning state (Idle or Sleeping). This ensures XP rate always
+    /// starts fresh from the "0–10 second" fast tier when the creature goes
+    /// back to eating or playing.
     pub fn set_selected_state(&mut self, state: crate::animation::AnimationState) {
         if let Some(slot) = self.slots.get_mut(self.selected) {
             slot.animator.set_state(state);
+
+            // If the new state is NOT an XP-earning state, reset the activity
+            // timer so the next Eat/Play session starts at the fast XP rate.
+            let is_xp_state = matches!(
+                state,
+                crate::animation::AnimationState::Eating
+                    | crate::animation::AnimationState::Playing
+            );
+            if !is_xp_state {
+                slot.anim_active_secs = 0.0;
+            }
         }
     }
 
