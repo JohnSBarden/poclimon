@@ -28,6 +28,7 @@ use ratatui_image::{
     picker::{Picker, ProtocolType},
     protocol::{Protocol, halfblocks::Halfblocks},
 };
+use image::imageops::FilterType;
 use std::collections::{HashMap, VecDeque};
 use std::fs::OpenOptions;
 use std::io;
@@ -550,7 +551,10 @@ impl App {
     #[allow(dead_code)]
     fn add_creature(&mut self) {
         if self.has_background_load() {
-            self.notify(NotifLevel::Warn, "Please wait for the current load to finish");
+            self.notify(
+                NotifLevel::Warn,
+                "Please wait for the current load to finish",
+            );
             return;
         }
         // Cap at 6 for the pen renderer.
@@ -606,7 +610,10 @@ impl App {
     /// Silently does nothing if the roster would drop below 1 creature.
     fn remove_selected(&mut self) {
         if self.has_background_load() {
-            self.notify(NotifLevel::Warn, "Please wait for the current load to finish");
+            self.notify(
+                NotifLevel::Warn,
+                "Please wait for the current load to finish",
+            );
             return;
         }
         if self.slots.len() <= 1 {
@@ -786,12 +793,19 @@ impl App {
         std::thread::spawn(move || {
             let mut slot = CreatureSlot::new(id, worker_name);
             let msg = match load_slot_sprites(&mut slot, scale) {
-                Ok(warnings) => SwapWorkerResult::Loaded { slot: Box::new(slot), warnings },
+                Ok(warnings) => SwapWorkerResult::Loaded {
+                    slot: Box::new(slot),
+                    warnings,
+                },
                 Err(e) => SwapWorkerResult::Failed(e.to_string()),
             };
             let _ = tx.send(msg);
         });
-        self.add_transition = Some(AddTransition { target_name, worker_rx: rx, worker_result: None });
+        self.add_transition = Some(AddTransition {
+            target_name,
+            worker_rx: rx,
+            worker_result: None,
+        });
     }
 
     /// Swap the selected creature to a new Pokémon by National Pokédex number.
@@ -808,7 +822,10 @@ impl App {
         std::thread::spawn(move || {
             let mut new_slot = CreatureSlot::new(id, worker_name);
             let msg = match load_slot_sprites(&mut new_slot, scale) {
-                Ok(warnings) => SwapWorkerResult::Loaded { slot: Box::new(new_slot), warnings },
+                Ok(warnings) => SwapWorkerResult::Loaded {
+                    slot: Box::new(new_slot),
+                    warnings,
+                },
                 Err(e) => SwapWorkerResult::Failed(e.to_string()),
             };
             let _ = tx.send(msg);
@@ -1257,7 +1274,11 @@ fn encode_all_frames(slot: &mut CreatureSlot, picker: &Picker, area: Rect) {
                         encode_halfblock_frame(img, area)
                     } else {
                         picker
-                            .new_protocol(img.clone(), area, Resize::Fit(None))
+                            .new_protocol(
+                                img.clone(),
+                                area,
+                                Resize::Scale(Some(FilterType::Nearest)),
+                            )
                             .ok()
                     }
                 })
@@ -1602,7 +1623,7 @@ fn run_app(
 
     while app.running {
         app.update_all_displays();
-        terminal.draw(|f| ui(f, app, picker))?;
+        terminal.draw(|f| ui(f, app, picker, env!("CARGO_PKG_VERSION")))?;
 
         if event::poll(frame_duration)?
             && let Event::Key(KeyEvent {
@@ -1626,12 +1647,15 @@ fn run_app(
                             app.prompt_buffer.clear();
                             if let Ok(id) = buf.parse::<u32>() {
                                 match mode {
-                                    PromptMode::Add  => app.add_creature_by_dex(id),
+                                    PromptMode::Add => app.add_creature_by_dex(id),
                                     PromptMode::Swap => app.swap_selected_to_dex(id),
                                     PromptMode::None => {}
                                 }
                             } else {
-                                app.notify(NotifLevel::Warn, "Invalid Pokédex number — enter digits only");
+                                app.notify(
+                                    NotifLevel::Warn,
+                                    "Invalid Pokédex number — enter digits only",
+                                );
                             }
                         }
                         KeyCode::Backspace => {
@@ -1660,7 +1684,10 @@ fn run_app(
                 }
                 KeyCode::Char('a') | KeyCode::Char('A') => {
                     if app.has_background_load() {
-                        app.notify(NotifLevel::Warn, "Please wait for the current load to finish");
+                        app.notify(
+                            NotifLevel::Warn,
+                            "Please wait for the current load to finish",
+                        );
                     } else if app.slots.len() < MAX_ACTIVE_CREATURES {
                         app.prompt_mode = PromptMode::Add;
                         app.prompt_buffer.clear();
@@ -1694,7 +1721,7 @@ fn run_app(
 
 // ── UI layout ──────────────────────────────────────────────────────────────────
 
-fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker) {
+fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) {
     let chunks = Layout::vertical([
         Constraint::Length(3), // Title bar
         Constraint::Min(10),   // Pen (shared creature canvas)
@@ -1725,7 +1752,7 @@ fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker) {
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title("⚡ PoCLImon v0.2.1"),
+            .title(format!("⚡ PoCLImon {version}")),
     );
     f.render_widget(title, chunks[0]);
 
@@ -1765,10 +1792,20 @@ fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker) {
         } else {
             "Loading"
         };
+        let display_name = if transition.recall_ticks > 0 {
+            // Show the outgoing Pokémon during recall
+            app.slots
+                .get(transition.slot_index)
+                .map(|s| s.creature_name.clone())
+                .unwrap_or_else(|| "???".to_string())
+        } else {
+            // Show the incoming Pokémon during load
+            transition.target_name.clone()
+        };
         status_lines.push(Line::from(vec![
             Span::styled("[Swap]  ", Style::default().fg(Color::LightMagenta)),
             Span::styled(
-                format!("{action} {}...", transition.target_name),
+                format!("{action} {display_name}..."),
                 Style::default().fg(Color::LightMagenta),
             ),
         ]));
@@ -1803,17 +1840,16 @@ fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker) {
     f.render_widget(status, chunks[2]);
 
     // Help bar
-    let help = Paragraph::new(
-        "[E]at [S]leep [I]dle [←/→] [1-6] [A]dd # [Tab]Swap # [R]emove [Q]uit",
-    )
-    .style(Style::default().fg(Color::DarkGray))
-    .block(Block::default().borders(Borders::ALL));
+    let help =
+        Paragraph::new("[E]at [S]leep [I]dle [←/→] [1-6] [A]dd # [Tab]Swap # [R]emove [Q]uit")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(Block::default().borders(Borders::ALL));
     f.render_widget(help, chunks[3]);
 
     // Prompt overlay — appears centered over the pen area when Add or Swap is active.
     if app.prompt_mode != PromptMode::None {
         let title = match app.prompt_mode {
-            PromptMode::Add  => " Add Pokémon ",
+            PromptMode::Add => " Add Pokémon ",
             PromptMode::Swap => " Swap to Pokémon ",
             PromptMode::None => "",
         };
@@ -2012,8 +2048,7 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
 
         if render_waiting_ball {
             f.render_widget(
-                Paragraph::new("⚪")
-                    .style(Style::default().fg(Color::LightRed)),
+                Paragraph::new("⚪").style(Style::default().fg(Color::LightRed)),
                 Rect::new(
                     render_x + sprite_w.saturating_sub(3) / 2,
                     render_y + sprite_h.saturating_sub(1) / 2,
@@ -2094,15 +2129,31 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
         };
 
         // Auto-size width to content, clamped to [8, SPRITE_W].
-        let content_w = name_display.chars().count().max(level_display.chars().count()) as u16;
+        let content_w = name_display
+            .chars()
+            .count()
+            .max(level_display.chars().count()) as u16;
         let label_w = (content_w + 2).clamp(8, SPRITE_W); // +2 for left/right borders
 
-        let label_x = render_x + (sprite_w.saturating_sub(label_w) / 2);
+        // Center under the actual rendered sprite width, not the full cell area.
+        // Kitty/Sixel/iTerm2 encode sprites narrower than sprite_w due to aspect
+        // ratio (e.g. a square sprite in a 32×10 area only fills ~18 columns).
+        // Halfblock always fills the full sprite_w. Use Protocol::area().width to
+        // get the true rendered width rather than guessing from font metrics.
+        let actual_sprite_w = pick_protocol_index(&slot.encoded_frames, 0, 0, 0)
+            .and_then(|(si, di, fi)| slot.encoded_frames[si][di][fi].as_ref())
+            .map(|p| p.area().width)
+            .unwrap_or(sprite_w);
+        let label_x = render_x + (actual_sprite_w.saturating_sub(label_w) / 2);
         let label_y = render_y + sprite_h.saturating_sub(LABEL_OVERLAP);
 
         if label_y + LABEL_H <= pen_inner.y + pen_inner.height {
             let label_area = Rect::new(label_x, label_y, label_w, LABEL_H);
-            let name_color = if is_selected { Color::Yellow } else { Color::White };
+            let name_color = if is_selected {
+                Color::Yellow
+            } else {
+                Color::White
+            };
             let block = Block::default().borders(Borders::ALL);
             let inner = block.inner(label_area);
             f.render_widget(block, label_area);
