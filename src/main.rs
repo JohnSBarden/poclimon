@@ -23,7 +23,11 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
 };
-use ratatui_image::{Image, Resize, picker::Picker, protocol::Protocol};
+use ratatui_image::{
+    Image, Resize,
+    picker::{Picker, ProtocolType},
+    protocol::{Protocol, halfblocks::Halfblocks},
+};
 use std::collections::{HashMap, VecDeque};
 use std::fs::OpenOptions;
 use std::io;
@@ -79,9 +83,14 @@ const MAX_CACHED_FRAMES: usize = 8;
 const MAX_SLOTS: usize = MAX_ACTIVE_CREATURES;
 
 /// Fixed sprite render size in terminal cells. All sprites are this size
-/// regardless of pen dimensions. 32×32 gives a clear, consistent look.
+/// regardless of pen dimensions.
 const SPRITE_W: u16 = 32;
-const SPRITE_H: u16 = 10; // was 16 — tighter area, label sits close to sprite
+/// Sprite height for image-protocol terminals (Kitty/Sixel/iTerm2).
+const SPRITE_H: u16 = 10;
+/// Sprite height for halfblock terminals (Alacritty, macOS Terminal, etc.).
+/// 16 rows × 2 pixel-rows/row = 32 pixel rows, matching SPRITE_W=32 columns
+/// for a 32×32 "pixel" canvas — enough to recognize creature sprites.
+const SPRITE_H_HALFBLOCKS: u16 = 16;
 
 const LABEL_H: u16 = 4; // top border + 2 content rows + bottom border
 const LABEL_OVERLAP: u16 = 0; // keep readable by hugging sprite edge, not overlapping pixels
@@ -1236,6 +1245,7 @@ fn encode_all_frames(slot: &mut CreatureSlot, picker: &Picker, area: Rect) {
     let recall = slot.cached_recall.clone();
 
     let caches: [&[Vec<image::DynamicImage>; 4]; 4] = [&idle, &eat, &sleep, &recall];
+    let is_halfblocks = picker.protocol_type() == ProtocolType::Halfblocks;
 
     slot.encoded_frames = std::array::from_fn(|state_idx| {
         let cache = caches[state_idx];
@@ -1243,14 +1253,41 @@ fn encode_all_frames(slot: &mut CreatureSlot, picker: &Picker, area: Rect) {
             cache[dir_idx]
                 .iter()
                 .map(|img| {
-                    picker
-                        .new_protocol(img.clone(), area, Resize::Fit(None))
-                        .ok()
+                    if is_halfblocks {
+                        encode_halfblock_frame(img, area)
+                    } else {
+                        picker
+                            .new_protocol(img.clone(), area, Resize::Fit(None))
+                            .ok()
+                    }
                 })
                 .collect()
         })
     });
     slot.encoded_rect = Some(area);
+}
+
+/// Encode a single frame for halfblock terminals, bypassing the picker's
+/// padded-image pipeline which squishes the sprite into only part of the canvas.
+///
+/// The picker pads the resized sprite into a full pixel area (e.g. 256×128),
+/// then Halfblocks::new's resize_exact compresses that padded image — the sprite
+/// ends up occupying only the left portion of the halfblock canvas, unrecognizable.
+///
+/// Instead: pre-resize to the exact halfblock pixel dimensions (area.width ×
+/// area.height×2) with Lanczos3, center it on a transparent canvas, and hand
+/// it straight to Halfblocks::new whose resize_exact becomes a no-op.
+fn encode_halfblock_frame(img: &image::DynamicImage, area: Rect) -> Option<Protocol> {
+    let pw = area.width as u32;
+    let ph = area.height as u32 * 2; // halfblock: 2 pixel-rows per terminal row
+    // Lanczos3 gives sharp edges — important for small pixel counts.
+    let resized = img.resize(pw, ph, image::imageops::FilterType::Lanczos3);
+    // Center the resized sprite on a transparent canvas of the exact target size.
+    let mut canvas = image::DynamicImage::new_rgba8(pw, ph);
+    let x_off = pw.saturating_sub(resized.width()) / 2;
+    let y_off = ph.saturating_sub(resized.height()) / 2;
+    image::imageops::overlay(&mut canvas, &resized, x_off as i64, y_off as i64);
+    Halfblocks::new(canvas, area).ok().map(Protocol::Halfblocks)
 }
 
 // ── Direction + collision helpers ─────────────────────────────────────────────
@@ -1845,12 +1882,17 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
         .as_ref()
         .map(|t| (t.slot_index, t.recall_ticks, t.worker_result.is_some()));
 
-    // Sprite size: fixed constants — same for all creatures regardless of pen dimensions.
+    // Sprite size: fixed width; height scales up for halfblock terminals so
+    // creatures render at 32×32 "pixels" instead of 20×20.
     let sprite_w = SPRITE_W;
-    let sprite_h = SPRITE_H;
+    let sprite_h = if picker.protocol_type() == ProtocolType::Halfblocks {
+        SPRITE_H_HALFBLOCKS
+    } else {
+        SPRITE_H
+    };
 
     // Size rect used for protocol encoding (position 0,0 — decoupled from render pos).
-    let size_rect = Rect::new(0, 0, SPRITE_W, SPRITE_H);
+    let size_rect = Rect::new(0, 0, sprite_w, sprite_h);
 
     // Phase 1: initialize positions, update movement, and set direction for all slots.
     for i in 0..count {
@@ -1914,7 +1956,7 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
     resolve_collisions(
         &mut app.slots,
         SPRITE_W,
-        sprite_stack_h(SPRITE_H),
+        sprite_stack_h(sprite_h),
         pen_inner.width,
         pen_inner.height,
     );
@@ -2053,7 +2095,7 @@ fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker)
 
         // Auto-size width to content, clamped to [8, SPRITE_W].
         let content_w = name_display.chars().count().max(level_display.chars().count()) as u16;
-        let label_w = (content_w + 2).min(SPRITE_W).max(8); // +2 for left/right borders
+        let label_w = (content_w + 2).clamp(8, SPRITE_W); // +2 for left/right borders
 
         let label_x = render_x + (sprite_w.saturating_sub(label_w) / 2);
         let label_y = render_y + sprite_h.saturating_sub(LABEL_OVERLAP);
