@@ -267,9 +267,10 @@ creatures = ["mewtwo"]
         let toml_config = TomlConfig::default();
         let config = GameConfig::from_toml(toml_config).unwrap();
         assert_eq!(config.scale, 3);
-        assert_eq!(config.roster.len(), 5);
+        assert_eq!(config.roster.len(), 3);
         assert_eq!(config.roster[0].1, "Bulbasaur");
-        assert_eq!(config.roster[3].1, "Pikachu");
+        assert_eq!(config.roster[1].1, "Charmander");
+        assert_eq!(config.roster[2].1, "Squirtle");
     }
 
     #[test]

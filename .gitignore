@@ -22,4 +22,3 @@ Cargo.lock
 # AI stuff
 CLAUDE.md
 .claude/
-docs/local/
