@@ -508,15 +508,14 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
     // we encode at (0,0) and render at the actual toy_area position, so the
     // same protocol works for every Playing creature regardless of where it is.
     //
-    // Toy width: half the sprite width.  Height: same as sprite height (fills
-    // the same vertical band as the creature for clean alignment).
+    // Toy width: half the sprite width.  Height: half the sprite height.
     //
     // Direction layout (current_dir): 0=Down  1=Left  2=Up  3=Right
     // NOTE: for Left-facing sprites the face is on the RIGHT side of the image,
     // so the toy goes RIGHT; Right-facing sprites have the face on the LEFT.
 
     const TOY_W: u16 = SPRITE_W / 2; // 16 cols
-    let toy_h = sprite_h;
+    let toy_h = sprite_h / 2;
     let toy_size_rect = Rect::new(0, 0, TOY_W, toy_h);
 
     // Lazily encode (or re-encode on terminal resize / protocol-type change).

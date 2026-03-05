@@ -590,14 +590,13 @@ pub fn encode_halfblock_frame(
     let pw = area.width as u32;
     let ph = area.height as u32 * 2; // halfblock: 2 pixel-rows per terminal row
     // Lanczos3 gives sharp edges — important for small pixel counts.
+    let resized = img.resize(pw, ph, FilterType::Lanczos3);
+    // Center the resized sprite on a transparent canvas of the exact target size.
+    let ox = pw.saturating_sub(resized.width()) / 2;
+    let oy = ph.saturating_sub(resized.height()) / 2;
     let mut canvas = image::DynamicImage::ImageRgba8(image::RgbaImage::new(pw, ph));
-    image::imageops::overlay(&mut canvas, img, 0, 0);
-    // Center the sprite on the canvas.
-    let ox = (pw.saturating_sub(img.width())) / 2;
-    let oy = (ph.saturating_sub(img.height())) / 2;
-    let mut centered = image::DynamicImage::ImageRgba8(image::RgbaImage::new(pw, ph));
-    image::imageops::overlay(&mut centered, &canvas, ox as i64, oy as i64);
-    ratatui_image::protocol::halfblocks::Halfblocks::new(centered, area)
+    image::imageops::overlay(&mut canvas, &resized, ox as i64, oy as i64);
+    ratatui_image::protocol::halfblocks::Halfblocks::new(canvas, area)
         .ok()
         .map(Protocol::Halfblocks)
 }
