@@ -72,9 +72,16 @@ pub struct CreatureSlot {
     /// `None` entries mean encoding failed for that frame (fallback shown).
     /// Rebuilt whenever `encoded_rect` changes (terminal resize or first render).
     pub encoded_frames: [[Vec<Option<Protocol>>; 4]; 5],
-    /// Current experience points earned by this creature.
+    /// Current experience points earned by this creature (whole numbers).
     /// Increases while the creature is Eating or Playing. Resets to 0 on level-up.
     pub xp: u32,
+    /// Sub-integer XP accumulator.
+    ///
+    /// XP is earned at rates like 2xp/sec, accrued 0.1xp per 50ms tick. Storing
+    /// only `u32` would floor every tick to 0 and XP would never increase.
+    /// Instead we bank the fractional part here and only "cash out" whole points
+    /// into `xp` once the accumulator crosses 1.0.
+    pub xp_frac: f32,
     /// Current level (starts at 1). Increases when `xp` hits the level threshold.
     /// Threshold = `50 * level` (50 xp for level 1→2, 100 for 2→3, etc.).
     pub level: u32,
@@ -137,6 +144,7 @@ impl CreatureSlot {
             dir_cooldown_ticks: 0,
             // XP and leveling — start at level 1, no XP yet.
             xp: 0,
+            xp_frac: 0.0,
             level: 1,
             anim_active_secs: 0.0,
         }

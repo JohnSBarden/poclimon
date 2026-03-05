@@ -412,6 +412,54 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
         }
     }
 
+    // ── Phase 3a.5: render toy emoji in front of Playing creatures ───────────────
+    // When a creature is Playing, draw a 🧸 one cell in front of the direction
+    // it's facing. This gives visual feedback that the creature is interacting
+    // with a toy, not just doing a random hop animation.
+    //
+    // Direction mapping (current_dir): 0=Down 1=Left 2=Up 3=Right
+    // The emoji is 2 terminal columns wide and 1 row tall.
+    for i in 0..count {
+        let slot = &app.slots[i];
+        if slot.animator.state() != AnimationState::Playing {
+            continue;
+        }
+
+        // Recompute render position (same math as Phase 3a).
+        let render_x = (pen_inner.x + slot.pos_x.round() as u16)
+            .min(pen_inner.x + pen_inner.width.saturating_sub(sprite_w));
+        let render_y = (pen_inner.y + slot.pos_y.round() as u16).min(
+            pen_inner.y
+                + pen_inner
+                    .height
+                    .saturating_sub(crate::creature::sprite_stack_h(sprite_h)),
+        );
+
+        // Place the emoji one cell beyond the sprite edge in the facing direction.
+        // Each match arm returns (col, row) in absolute terminal coordinates.
+        let sprite_mid_x = render_x + sprite_w / 2;
+        let sprite_mid_y = render_y + sprite_h / 2;
+        let (emoji_x, emoji_y) = match slot.current_dir {
+            0 => (sprite_mid_x.saturating_sub(1), render_y + sprite_h),         // Down  — below centre
+            1 => (render_x.saturating_sub(2),      sprite_mid_y),               // Left  — to the left
+            2 => (sprite_mid_x.saturating_sub(1),  render_y.saturating_sub(1)), // Up    — above centre
+            _ => (render_x + sprite_w,              sprite_mid_y),               // Right — to the right
+        };
+
+        // Clip to pen bounds before rendering to avoid drawing outside the panel.
+        let in_bounds = emoji_x >= pen_inner.x
+            && emoji_y >= pen_inner.y
+            && emoji_x + 2 <= pen_inner.x + pen_inner.width
+            && emoji_y + 1 <= pen_inner.y + pen_inner.height;
+
+        if in_bounds {
+            f.render_widget(
+                Paragraph::new("🧸").style(Style::default()),
+                Rect::new(emoji_x, emoji_y, 2, 1),
+            );
+        }
+    }
+
     // ── Phase 3b: render compact bordered nameplates ──────────────────────────────
     for i in 0..count {
         let slot = &app.slots[i];

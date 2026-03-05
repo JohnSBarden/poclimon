@@ -163,11 +163,18 @@ impl App {
                 0.0_f32 // No gain after 40 seconds (diminishing returns)
             };
 
-            // Accumulate fractional XP, then floor to u32.
-            // Using a small float accumulator avoids rounding every tick.
-            let fractional_gain = xp_rate * TICK_SECS;
-            let new_xp_f = slot.xp as f32 + fractional_gain;
-            slot.xp = new_xp_f.floor() as u32;
+            // Accumulate fractional XP using a dedicated f32 bucket.
+            //
+            // Why: at 2xp/sec each 50ms tick only earns 0.1 xp. If we floor
+            // that directly into a u32 we'd get 0 every single tick and XP
+            // would never increase. Instead we bank the raw gain in `xp_frac`
+            // and only cash whole points into `xp` once the bucket ≥ 1.0.
+            slot.xp_frac += xp_rate * TICK_SECS;
+            let whole = slot.xp_frac.floor() as u32;
+            if whole > 0 {
+                slot.xp = slot.xp.saturating_add(whole);
+                slot.xp_frac -= whole as f32; // keep only the leftover fraction
+            }
 
             // Check for level-up: threshold is 50 * current_level.
             let threshold = 50 * slot.level;
