@@ -59,6 +59,7 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
             AnimationState::Idle => "Idle",
             AnimationState::Eating => "Nomming 🍖",
             AnimationState::Sleeping => "Sleeping 💤",
+            AnimationState::Playing => "Playing 🧸",
         })
         .unwrap_or("—");
     let status_color = app
@@ -68,6 +69,8 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
             AnimationState::Idle => Color::Green,
             AnimationState::Eating => Color::Yellow,
             AnimationState::Sleeping => Color::Blue,
+            // Magenta distinguishes Playing from other states at a glance.
+            AnimationState::Playing => Color::Magenta,
         })
         .unwrap_or(Color::White);
 
@@ -136,7 +139,7 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
 
     // Help bar
     let help =
-        Paragraph::new("[E]at [S]leep [I]dle [←/→] [1-6] [A]dd # [Tab]Swap # [R]emove [Q]uit")
+        Paragraph::new("[E]at [S]leep [I]dle [P]lay [←/→] [1-6] [A]dd # [Tab]Swap # [R]emove [Q]uit")
             .style(Style::default().fg(Color::DarkGray))
             .block(Block::default().borders(Borders::ALL));
     f.render_widget(help, chunks[3]);
@@ -306,10 +309,14 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
 
         let state = slot.animator.state();
         let mut frame_idx = slot.animator.current_frame_index().unwrap_or(0);
+        // Map AnimationState → encoded_frames index.
+        // Must stay in sync with the order in encode_all_frames:
+        //   0=Idle, 1=Eat, 2=Sleep, 3=Recall, 4=Playing.
         let mut state_idx = match state {
             AnimationState::Idle => 0,
             AnimationState::Eating => 1,
             AnimationState::Sleeping => 2,
+            AnimationState::Playing => 4,
         };
         let dir_idx = slot.current_dir;
 
@@ -426,13 +433,24 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
             if is_selected { "◉" } else { " " },
             slot.creature_name.to_uppercase()
         );
+        // Row 2: show level + XP progress when in an active (XP-earning or
+        // sleeping) state; just the level when Idle (no XP accrues while Idle).
         let level_display = {
-            let icon = match slot.animator.state() {
-                AnimationState::Idle => "",
-                AnimationState::Eating => "🍖",
-                AnimationState::Sleeping => "💤",
-            };
-            format!("Lv.1 {icon}")
+            let threshold = 50 * slot.level;
+            match slot.animator.state() {
+                // Idle: just show level — no XP bar since XP doesn't accrue.
+                AnimationState::Idle => format!("Lv.{}", slot.level),
+                // Active states: show level, XP progress, and emoji icon.
+                AnimationState::Eating => {
+                    format!("Lv.{}  {}/{}xp  🍖", slot.level, slot.xp, threshold)
+                }
+                AnimationState::Sleeping => {
+                    format!("Lv.{}  {}/{}xp  💤", slot.level, slot.xp, threshold)
+                }
+                AnimationState::Playing => {
+                    format!("Lv.{}  {}/{}xp  🧸", slot.level, slot.xp, threshold)
+                }
+            }
         };
 
         // Auto-size width to content, clamped to [8, SPRITE_W].
@@ -477,6 +495,93 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
             );
         }
     }
+
+    // ── Phase 3c: poke-doll sprite for Playing creatures ─────────────────────────
+    //
+    // The poke-doll image (bundled PNG, decoded at startup) is rendered as a
+    // real Protocol image — same pipeline as creature sprites. It is placed
+    // OUTSIDE the creature sprite, adjacent to the face-edge in the direction
+    // the creature is currently facing.
+    //
+    // The Protocol is encoded once per terminal size/type (lazy, same pattern as
+    // encode_all_frames) and stored in app.toy_proto.  Position-independence:
+    // we encode at (0,0) and render at the actual toy_area position, so the
+    // same protocol works for every Playing creature regardless of where it is.
+    //
+    // Toy width: half the sprite width.  Height: same as sprite height (fills
+    // the same vertical band as the creature for clean alignment).
+    //
+    // Direction layout (current_dir): 0=Down  1=Left  2=Up  3=Right
+    // NOTE: for Left-facing sprites the face is on the RIGHT side of the image,
+    // so the toy goes RIGHT; Right-facing sprites have the face on the LEFT.
+
+    const TOY_W: u16 = SPRITE_W / 2; // 16 cols
+    let toy_h = sprite_h;
+    let toy_size_rect = Rect::new(0, 0, TOY_W, toy_h);
+
+    // Lazily encode (or re-encode on terminal resize / protocol-type change).
+    if app.toy_proto_rect != Some(toy_size_rect) {
+        let img = app.toy_image.clone();
+        app.toy_proto = crate::sprite_loading::encode_toy_image(&img, picker, toy_size_rect);
+        app.toy_proto_rect = Some(toy_size_rect);
+    }
+
+    for i in 0..count {
+        let slot = &app.slots[i];
+        if slot.animator.state() != AnimationState::Playing {
+            continue;
+        }
+
+        // Recompute render position (same formula as Phase 3a/3b).
+        let render_x = (pen_inner.x + slot.pos_x.round() as u16)
+            .min(pen_inner.x + pen_inner.width.saturating_sub(sprite_w));
+        let render_y = (pen_inner.y + slot.pos_y.round() as u16).min(
+            pen_inner.y
+                + pen_inner
+                    .height
+                    .saturating_sub(crate::creature::sprite_stack_h(sprite_h)),
+        );
+
+        // Use the true rendered sprite width (same as nameplate logic).
+        let actual_sprite_w = pick_protocol_index(&slot.encoded_frames, 0, 0, 0)
+            .and_then(|(si, di, fi)| slot.encoded_frames[si][di][fi].as_ref())
+            .map(|p| p.area().width)
+            .unwrap_or(sprite_w);
+
+        let rx = render_x as i32;
+        let ry = render_y as i32;
+        let sw = actual_sprite_w as i32;
+        let sh = sprite_h as i32;
+        let tw = TOY_W as i32;
+        let th = toy_h as i32;
+
+        let (toy_x, toy_y) = match slot.current_dir {
+            // Down  — just below, horizontally centred on the sprite
+            0 => (rx + sw / 2 - tw / 2, ry + sh),
+            // Left  — face on right side of the Left sprite → toy to the right
+            1 => (rx + sw, ry + sh / 2 - th / 2),
+            // Up    — just above, horizontally centred on the sprite
+            2 => (rx + sw / 2 - tw / 2, ry - th),
+            // Right — face on left side of the Right sprite → toy to the left
+            _ => (rx - tw, ry + sh / 2 - th / 2),
+        };
+
+        let px = pen_inner.x as i32;
+        let py = pen_inner.y as i32;
+        let fits = toy_x >= px
+            && toy_y >= py
+            && toy_x + tw <= px + pen_inner.width as i32
+            && toy_y + th <= py + pen_inner.height as i32;
+
+        if fits {
+            if let Some(proto) = app.toy_proto.as_mut() {
+                f.render_widget(
+                    Image::new(proto),
+                    Rect::new(toy_x as u16, toy_y as u16, TOY_W, toy_h),
+                );
+            }
+        }
+    }
 }
 
 /// Pick a renderable protocol frame with fallbacks:
@@ -484,8 +589,10 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
 /// 2) any frame in requested state+dir
 /// 3) any direction in requested state
 /// 4) any direction in Idle state
+///
+/// The array has 5 states: 0=Idle, 1=Eat, 2=Sleep, 3=Recall, 4=Playing.
 fn pick_protocol_index(
-    encoded: &[[Vec<Option<Protocol>>; 4]; 4],
+    encoded: &[[Vec<Option<Protocol>>; 4]; 5],
     state_idx: usize,
     dir_idx: usize,
     frame_idx: usize,

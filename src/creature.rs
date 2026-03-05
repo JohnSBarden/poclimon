@@ -61,12 +61,35 @@ pub struct CreatureSlot {
     /// Pre-scaled, normalized frames for recall animation, preferring Spin and
     /// falling back to Rotate, then Idle.
     pub cached_recall: [Vec<DynamicImage>; 4],
+    /// Pre-scaled, normalized frames for the Playing / "Hop" animation.
+    /// Falls back to Idle frames when the Hop sheet is missing from PMDCollab
+    /// (same pattern as Eat/Sleep fallback), so the creature always has smooth
+    /// movement even without a dedicated hop sprite.
+    pub cached_hop: [Vec<DynamicImage>; 4],
     /// Pre-encoded Protocol objects, indexed by [state_index][dir_index][frame_index].
-    /// state 0 = Idle, 1 = Eat, 2 = Sleep, 3 = Recall.
+    /// state 0 = Idle, 1 = Eat, 2 = Sleep, 3 = Recall, 4 = Playing (Hop).
     /// dir: 0=Down, 1=Left, 2=Up, 3=Right.
     /// `None` entries mean encoding failed for that frame (fallback shown).
     /// Rebuilt whenever `encoded_rect` changes (terminal resize or first render).
-    pub encoded_frames: [[Vec<Option<Protocol>>; 4]; 4],
+    pub encoded_frames: [[Vec<Option<Protocol>>; 4]; 5],
+    /// Current experience points earned by this creature (whole numbers).
+    /// Increases while the creature is Eating or Playing. Resets to 0 on level-up.
+    pub xp: u32,
+    /// Sub-integer XP accumulator.
+    ///
+    /// XP is earned at rates like 2xp/sec, accrued 0.1xp per 50ms tick. Storing
+    /// only `u32` would floor every tick to 0 and XP would never increase.
+    /// Instead we bank the fractional part here and only "cash out" whole points
+    /// into `xp` once the accumulator crosses 1.0.
+    pub xp_frac: f32,
+    /// Current level (starts at 1). Increases when `xp` hits the level threshold.
+    /// Threshold = `50 * level` (50 xp for level 1→2, 100 for 2→3, etc.).
+    pub level: u32,
+    /// Seconds the creature has been continuously in an XP-earning state (Eating
+    /// or Playing). Used to throttle XP gain over time — rate slows at 10s and
+    /// stops at 40s. Resets to 0.0 whenever the state switches away from
+    /// Eating/Playing.
+    pub anim_active_secs: f32,
     /// The size `Rect` (position 0,0) these protocols were encoded for.
     /// `None` means not yet encoded. Position-independent — re-encode only on resize.
     pub encoded_rect: Option<ratatui::layout::Rect>,
@@ -104,6 +127,10 @@ impl CreatureSlot {
             cached_eat: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
             cached_sleep: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
             cached_recall: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            // Hop starts empty; filled by load_slot_sprites. Falls back to Idle
+            // frames if the Hop sheet is missing.
+            cached_hop: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            // 5 states: Idle=0, Eat=1, Sleep=2, Recall=3, Playing=4.
             encoded_frames: std::array::from_fn(|_| std::array::from_fn(|_| Vec::new())),
             encoded_rect: None,
             pos_x: 0.0,
@@ -115,6 +142,11 @@ impl CreatureSlot {
             pause_ticks: 0,
             pause_face_down: false,
             dir_cooldown_ticks: 0,
+            // XP and leveling — start at level 1, no XP yet.
+            xp: 0,
+            xp_frac: 0.0,
+            level: 1,
+            anim_active_secs: 0.0,
         }
     }
 

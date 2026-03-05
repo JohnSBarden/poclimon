@@ -312,25 +312,78 @@ pub fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<Stri
     };
     slot.cached_recall = recall_frames_by_dir;
 
+    // ── Hop (Playing) animation ───────────────────────────────────────────────
+    // Try to load "Hop" from PMDCollab. Falls back to Idle frames when missing,
+    // following the exact same pattern as Eat/Sleep above.
+    let (hop_down_raw, hop_timing_raw, _, _, hop_fallback) = load_and_scale_animation(
+        "Hop",
+        &sheets,
+        &anim_infos,
+        scale,
+        Some((idle_w, idle_h)),
+        DIR_ROWS[0],
+    )?;
+    let (hop_frames_by_dir, hop_timing) = if hop_fallback {
+        // No Hop sheet — reuse Idle frames so Playing looks like a livelier Idle.
+        (slot.cached_idle.clone(), idle_timing.clone())
+    } else {
+        let hop_left = load_and_scale_animation(
+            "Hop",
+            &sheets,
+            &anim_infos,
+            scale,
+            Some((idle_w, idle_h)),
+            DIR_ROWS[1],
+        )
+        .map(|r| r.0)
+        .unwrap_or_else(|_| hop_down_raw.clone());
+        let hop_up = load_and_scale_animation(
+            "Hop",
+            &sheets,
+            &anim_infos,
+            scale,
+            Some((idle_w, idle_h)),
+            DIR_ROWS[2],
+        )
+        .map(|r| r.0)
+        .unwrap_or_else(|_| hop_down_raw.clone());
+        let hop_right = load_and_scale_animation(
+            "Hop",
+            &sheets,
+            &anim_infos,
+            scale,
+            Some((idle_w, idle_h)),
+            DIR_ROWS[3],
+        )
+        .map(|r| r.0)
+        .unwrap_or_else(|_| hop_down_raw.clone());
+        ([hop_down_raw, hop_left, hop_up, hop_right], hop_timing_raw)
+    };
+    slot.cached_hop = hop_frames_by_dir;
+
     // Give the animator timing-only Animation objects (no pixel data).
     slot.animator = crate::animation::Animator::new();
     slot.animator
         .load_animations(idle_timing, eat_timing, sleep_timing);
+    // Wire up the Playing / Hop timing separately (separate setter to keep
+    // load_animations signature stable).
+    slot.animator.set_hop_animation(hop_timing);
 
     // Invalidate encoded frames so that first render re-encodes for the actual Rect.
     slot.encoded_rect = None;
+    // 5 states: Idle=0, Eat=1, Sleep=2, Recall=3, Playing=4.
     slot.encoded_frames = std::array::from_fn(|_| std::array::from_fn(|_| Vec::new()));
 
     // Filter out warnings for animations we gracefully handled via Idle fallback
-    // or optional recall animation fallbacks (Spin/Rotate).
-    let filtered_warnings = if eat_fallback || sleep_fallback {
+    // or optional recall animation fallbacks (Spin/Rotate/Hop).
+    let filtered_warnings = if eat_fallback || sleep_fallback || hop_fallback {
         warnings
             .into_iter()
             .filter(|w| {
                 let w_lower = w.to_lowercase();
-                // Keep warnings that aren't about the animations we handled
                 !(eat_fallback && w_lower.contains("eat")
                     || sleep_fallback && w_lower.contains("sleep")
+                    || hop_fallback && w_lower.contains("hop")
                     || w_lower.contains("spin")
                     || w_lower.contains("rotate"))
             })
@@ -453,8 +506,11 @@ pub fn encode_all_frames(slot: &mut CreatureSlot, picker: &Picker, area: ratatui
     let eat = slot.cached_eat.clone();
     let sleep = slot.cached_sleep.clone();
     let recall = slot.cached_recall.clone();
+    // Hop is the 5th state (index 4 = Playing).
+    let hop = slot.cached_hop.clone();
 
-    let caches: [&[Vec<image::DynamicImage>; 4]; 4] = [&idle, &eat, &sleep, &recall];
+    // 5 caches: Idle=0, Eat=1, Sleep=2, Recall=3, Playing/Hop=4.
+    let caches: [&[Vec<image::DynamicImage>; 4]; 5] = [&idle, &eat, &sleep, &recall, &hop];
     let is_halfblocks = picker.protocol_type() == ratatui_image::picker::ProtocolType::Halfblocks;
 
     slot.encoded_frames = std::array::from_fn(|state_idx| {
@@ -479,6 +535,42 @@ pub fn encode_all_frames(slot: &mut CreatureSlot, picker: &Picker, area: ratatui
         })
     });
     slot.encoded_rect = Some(area);
+}
+
+/// Encode an arbitrary-sized image (e.g. the poke-doll sprite) into a
+/// `Protocol` for the given area, handling both halfblock and image-protocol
+/// terminals.
+///
+/// Unlike `encode_halfblock_frame`, this scales the source image to fit within
+/// the canvas before encoding — necessary when the source hasn't been
+/// pre-scaled like creature sprite frames are.
+pub fn encode_toy_image(
+    img: &image::DynamicImage,
+    picker: &Picker,
+    area: ratatui::layout::Rect,
+) -> Option<Protocol> {
+    if picker.protocol_type() == ratatui_image::picker::ProtocolType::Halfblocks {
+        let pw = area.width as u32;
+        let ph = area.height as u32 * 2; // halfblock: 2 pixel-rows per terminal row
+        // Scale to fit within the pixel canvas, maintaining aspect ratio.
+        let scaled = img.resize(pw, ph, FilterType::Lanczos3);
+        // Center the scaled image on a transparent canvas.
+        let ox = pw.saturating_sub(scaled.width()) / 2;
+        let oy = ph.saturating_sub(scaled.height()) / 2;
+        let mut canvas = image::DynamicImage::ImageRgba8(image::RgbaImage::new(pw, ph));
+        image::imageops::overlay(&mut canvas, &scaled, ox as i64, oy as i64);
+        ratatui_image::protocol::halfblocks::Halfblocks::new(canvas, area)
+            .ok()
+            .map(Protocol::Halfblocks)
+    } else {
+        picker
+            .new_protocol(
+                img.clone(),
+                area,
+                Resize::Scale(Some(FilterType::Lanczos3)),
+            )
+            .ok()
+    }
 }
 
 /// Encode a single frame for halfblock terminals, bypassing the picker's
