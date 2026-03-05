@@ -53,9 +53,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut app = App::new(config);
 
-    // TUI is now active — sprite load failures become in-TUI notifications
-    // rather than eprintln! (which would corrupt the alternate screen).
-    app.load_all_sprites();
+    // Start sprite loads in background threads — game loop renders immediately
+    // while sprites arrive. Slots show "Loading…" until their worker completes.
+    app.start_background_loads();
 
     let res = run_app(&mut terminal, &mut app, &mut picker);
 

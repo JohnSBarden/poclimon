@@ -496,20 +496,36 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
         }
     }
 
-    // ── Phase 3c: toy emoji overlay for Playing creatures ────────────────────────
+    // ── Phase 3c: poke-doll sprite for Playing creatures ─────────────────────────
     //
-    // Rendered LAST so it's always on top of sprites and nameplates — nothing
-    // can overdraw it. Text widgets always paint over image-protocol cells in
-    // ratatui, so this is safe.
+    // The poke-doll image (bundled PNG, decoded at startup) is rendered as a
+    // real Protocol image — same pipeline as creature sprites. It is placed
+    // OUTSIDE the creature sprite, adjacent to the face-edge in the direction
+    // the creature is currently facing.
     //
-    // The 🧸 is placed on top of the sprite itself, at the face-end in the
-    // direction the creature is currently facing. A magenta background makes
-    // it pop against any sprite colours.
+    // The Protocol is encoded once per terminal size/type (lazy, same pattern as
+    // encode_all_frames) and stored in app.toy_proto.  Position-independence:
+    // we encode at (0,0) and render at the actual toy_area position, so the
+    // same protocol works for every Playing creature regardless of where it is.
     //
-    // Widget is 4 cols × 1 row: (1 pad + 🧸 [2 cols] + 1 pad) — wide enough
-    // to be clearly visible against a 32-column sprite.
+    // Toy width: half the sprite width.  Height: same as sprite height (fills
+    // the same vertical band as the creature for clean alignment).
     //
     // Direction layout (current_dir): 0=Down  1=Left  2=Up  3=Right
+    // NOTE: for Left-facing sprites the face is on the RIGHT side of the image,
+    // so the toy goes RIGHT; Right-facing sprites have the face on the LEFT.
+
+    const TOY_W: u16 = SPRITE_W / 2; // 16 cols
+    let toy_h = sprite_h;
+    let toy_size_rect = Rect::new(0, 0, TOY_W, toy_h);
+
+    // Lazily encode (or re-encode on terminal resize / protocol-type change).
+    if app.toy_proto_rect != Some(toy_size_rect) {
+        let img = app.toy_image.clone();
+        app.toy_proto = crate::sprite_loading::encode_toy_image(&img, picker, toy_size_rect);
+        app.toy_proto_rect = Some(toy_size_rect);
+    }
+
     for i in 0..count {
         let slot = &app.slots[i];
         if slot.animator.state() != AnimationState::Playing {
@@ -526,38 +542,44 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
                     .saturating_sub(crate::creature::sprite_stack_h(sprite_h)),
         );
 
-        // Badge dimensions: 4 wide × 1 tall.
-        // Positioned at the edge of the sprite that corresponds to the facing
-        // direction so it looks like the toy is sitting in front of the creature.
-        const TOY_W: u16 = 4;
-        const TOY_H: u16 = 1;
+        // Use the true rendered sprite width (same as nameplate logic).
+        let actual_sprite_w = pick_protocol_index(&slot.encoded_frames, 0, 0, 0)
+            .and_then(|(si, di, fi)| slot.encoded_frames[si][di][fi].as_ref())
+            .map(|p| p.area().width)
+            .unwrap_or(sprite_w);
 
-        // Vertical centre of the sprite (for left/right placement).
-        let sprite_vert_mid = render_y + sprite_h / 2;
+        let rx = render_x as i32;
+        let ry = render_y as i32;
+        let sw = actual_sprite_w as i32;
+        let sh = sprite_h as i32;
+        let tw = TOY_W as i32;
+        let th = toy_h as i32;
 
         let (toy_x, toy_y) = match slot.current_dir {
-            // Down  — bottom-centre of the sprite image
-            0 => (render_x + sprite_w / 2 - TOY_W / 2, render_y + sprite_h - TOY_H),
-            // Left  — left edge, vertically centred
-            1 => (render_x, sprite_vert_mid),
-            // Up    — top-centre of the sprite image
-            2 => (render_x + sprite_w / 2 - TOY_W / 2, render_y),
-            // Right — right edge, vertically centred
-            _ => (render_x + sprite_w - TOY_W, sprite_vert_mid),
+            // Down  — just below, horizontally centred on the sprite
+            0 => (rx + sw / 2 - tw / 2, ry + sh),
+            // Left  — face on right side of the Left sprite → toy to the right
+            1 => (rx + sw, ry + sh / 2 - th / 2),
+            // Up    — just above, horizontally centred on the sprite
+            2 => (rx + sw / 2 - tw / 2, ry - th),
+            // Right — face on left side of the Right sprite → toy to the left
+            _ => (rx - tw, ry + sh / 2 - th / 2),
         };
 
-        // Guard: only draw if the badge fits inside the pen panel.
-        let fits = toy_x >= pen_inner.x
-            && toy_y >= pen_inner.y
-            && toy_x + TOY_W <= pen_inner.x + pen_inner.width
-            && toy_y + TOY_H <= pen_inner.y + pen_inner.height;
+        let px = pen_inner.x as i32;
+        let py = pen_inner.y as i32;
+        let fits = toy_x >= px
+            && toy_y >= py
+            && toy_x + tw <= px + pen_inner.width as i32
+            && toy_y + th <= py + pen_inner.height as i32;
 
         if fits {
-            f.render_widget(
-                Paragraph::new(" 🧸")
-                    .style(Style::default().fg(Color::White).bg(Color::Magenta)),
-                Rect::new(toy_x, toy_y, TOY_W, TOY_H),
-            );
+            if let Some(proto) = app.toy_proto.as_mut() {
+                f.render_widget(
+                    Image::new(proto),
+                    Rect::new(toy_x as u16, toy_y as u16, TOY_W, toy_h),
+                );
+            }
         }
     }
 }

@@ -31,6 +31,17 @@ pub struct App {
     pub notifications: VecDeque<Notification>,
     pub swap_transition: Option<SwapTransition>,
     pub add_transition: Option<AddTransition>,
+    /// Background sprite loads kicked off at startup — one per initial roster slot.
+    /// Each entry is (slot_index, expected_creature_id, receiver). The creature_id
+    /// guard discards results if the slot was swapped before the load finished.
+    pub startup_loads: Vec<(usize, u32, mpsc::Receiver<SwapWorkerResult>)>,
+    /// The poke-doll sprite image, decoded once from the bundled PNG at startup.
+    pub toy_image: image::DynamicImage,
+    /// Encoded `Protocol` for the poke-doll, cached and re-encoded only when the
+    /// terminal size or protocol type changes (same lazy pattern as creature sprites).
+    pub toy_proto: Option<ratatui_image::protocol::Protocol>,
+    /// The size `Rect` (position 0,0) the toy protocol was encoded for.
+    pub toy_proto_rect: Option<ratatui::layout::Rect>,
     /// What kind of text prompt is currently active (if any).
     pub prompt_mode: PromptMode,
     /// Characters typed so far in the active prompt.
@@ -45,6 +56,10 @@ impl App {
             .map(|(id, name)| CreatureSlot::new(*id, name.clone()))
             .collect();
 
+        const TOY_PNG: &[u8] = include_bytes!("../assets/poke_doll.png");
+        let toy_image = image::load_from_memory(TOY_PNG)
+            .expect("bundled poke_doll.png is a valid PNG");
+
         Self {
             config,
             slots,
@@ -54,6 +69,10 @@ impl App {
             notifications: VecDeque::new(),
             swap_transition: None,
             add_transition: None,
+            startup_loads: Vec::new(),
+            toy_image,
+            toy_proto: None,
+            toy_proto_rect: None,
             prompt_mode: PromptMode::None,
             prompt_buffer: String::new(),
         }
@@ -81,21 +100,82 @@ impl App {
         self.notifications.retain(|n| n.created_at.elapsed() < ttl);
     }
 
-    /// Load sprites for all creatures currently in the roster.
+    /// Kick off background sprite loads for every slot in the initial roster.
     ///
-    /// Errors and sprite warnings are posted as notifications rather than
-    /// written to stderr (which would corrupt the TUI canvas).
-    pub fn load_all_sprites(&mut self) {
-        for i in 0..self.slots.len() {
-            match crate::sprite_loading::load_slot_sprites(&mut self.slots[i], self.config.scale) {
-                Ok(warnings) => {
+    /// Returns immediately so the game loop can render its first frame at once.
+    /// Slots show "Loading…" until their worker finishes and `update_startup_loads`
+    /// swaps in the populated slot.
+    pub fn start_background_loads(&mut self) {
+        let scale = self.config.scale;
+        for (idx, slot) in self.slots.iter().enumerate() {
+            let id = slot.creature_id;
+            let name = slot.creature_name.clone();
+            let (tx, rx) = mpsc::channel::<SwapWorkerResult>();
+            std::thread::spawn(move || {
+                let mut new_slot = CreatureSlot::new(id, name);
+                let msg = match crate::sprite_loading::load_slot_sprites(&mut new_slot, scale) {
+                    Ok(warnings) => SwapWorkerResult::Loaded {
+                        slot: Box::new(new_slot),
+                        warnings,
+                    },
+                    Err(e) => SwapWorkerResult::Failed(e.to_string()),
+                };
+                let _ = tx.send(msg);
+            });
+            self.startup_loads.push((idx, id, rx));
+        }
+    }
+
+    /// Poll completed startup loads and apply them.
+    ///
+    /// Physics state (position, velocity, direction) is copied from the current
+    /// slot so the creature doesn't teleport when sprites arrive. If the slot's
+    /// creature was swapped before the load finished, the stale result is dropped.
+    fn update_startup_loads(&mut self) {
+        let mut completions: Vec<(usize, u32, SwapWorkerResult)> = Vec::new();
+        self.startup_loads.retain(|(slot_index, creature_id, rx)| {
+            match rx.try_recv() {
+                Ok(result) => {
+                    completions.push((*slot_index, *creature_id, result));
+                    false
+                }
+                Err(mpsc::TryRecvError::Empty) => true,
+                Err(mpsc::TryRecvError::Disconnected) => false,
+            }
+        });
+        for (slot_index, expected_id, result) in completions {
+            match result {
+                SwapWorkerResult::Loaded { mut slot, warnings } => {
+                    if slot_index >= self.slots.len() {
+                        continue;
+                    }
+                    let existing = &self.slots[slot_index];
+                    // Discard if the slot was swapped to a different creature.
+                    if existing.creature_id != expected_id {
+                        continue;
+                    }
+                    // Preserve physics so the creature doesn't teleport.
+                    slot.pos_x = existing.pos_x;
+                    slot.pos_y = existing.pos_y;
+                    slot.vel_x = existing.vel_x;
+                    slot.vel_y = existing.vel_y;
+                    slot.current_dir = existing.current_dir;
+                    slot.dir_hold_ticks = existing.dir_hold_ticks;
+                    slot.pause_ticks = existing.pause_ticks;
+                    slot.pause_face_down = existing.pause_face_down;
+                    slot.dir_cooldown_ticks = existing.dir_cooldown_ticks;
+                    self.slots[slot_index] = *slot;
                     for w in warnings {
                         self.notify(NotifLevel::Warn, w);
                     }
                 }
-                Err(e) => {
-                    let name = self.slots[i].creature_name.clone();
-                    self.notify(NotifLevel::Error, format!("Failed to load {name}: {e}"));
+                SwapWorkerResult::Failed(err) => {
+                    let name = self
+                        .slots
+                        .get(slot_index)
+                        .map(|s| s.creature_name.clone())
+                        .unwrap_or_default();
+                    self.notify(NotifLevel::Error, format!("Failed to load {name}: {err}"));
                 }
             }
         }
@@ -111,6 +191,7 @@ impl App {
         }
         // Advance XP for creatures that are actively eating or playing.
         self.tick_xp();
+        self.update_startup_loads();
         self.update_swap_transition();
         self.update_add_transition();
         self.expire_notifications(Duration::from_secs(crate::notification::NOTIF_TTL_SECS));

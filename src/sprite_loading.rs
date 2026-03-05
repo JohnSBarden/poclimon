@@ -537,6 +537,42 @@ pub fn encode_all_frames(slot: &mut CreatureSlot, picker: &Picker, area: ratatui
     slot.encoded_rect = Some(area);
 }
 
+/// Encode an arbitrary-sized image (e.g. the poke-doll sprite) into a
+/// `Protocol` for the given area, handling both halfblock and image-protocol
+/// terminals.
+///
+/// Unlike `encode_halfblock_frame`, this scales the source image to fit within
+/// the canvas before encoding — necessary when the source hasn't been
+/// pre-scaled like creature sprite frames are.
+pub fn encode_toy_image(
+    img: &image::DynamicImage,
+    picker: &Picker,
+    area: ratatui::layout::Rect,
+) -> Option<Protocol> {
+    if picker.protocol_type() == ratatui_image::picker::ProtocolType::Halfblocks {
+        let pw = area.width as u32;
+        let ph = area.height as u32 * 2; // halfblock: 2 pixel-rows per terminal row
+        // Scale to fit within the pixel canvas, maintaining aspect ratio.
+        let scaled = img.resize(pw, ph, FilterType::Lanczos3);
+        // Center the scaled image on a transparent canvas.
+        let ox = pw.saturating_sub(scaled.width()) / 2;
+        let oy = ph.saturating_sub(scaled.height()) / 2;
+        let mut canvas = image::DynamicImage::ImageRgba8(image::RgbaImage::new(pw, ph));
+        image::imageops::overlay(&mut canvas, &scaled, ox as i64, oy as i64);
+        ratatui_image::protocol::halfblocks::Halfblocks::new(canvas, area)
+            .ok()
+            .map(Protocol::Halfblocks)
+    } else {
+        picker
+            .new_protocol(
+                img.clone(),
+                area,
+                Resize::Scale(Some(FilterType::Lanczos3)),
+            )
+            .ok()
+    }
+}
+
 /// Encode a single frame for halfblock terminals, bypassing the picker's
 /// padded-image pipeline which squishes sprite into only part of the canvas.
 ///
