@@ -1,6 +1,6 @@
 [package]
 name = "poclimon"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 description = "A terminal-based creature virtual pet"
 authors = ["John Barden"]
@@ -26,4 +26,7 @@ rand = "0.8"
 clap = { version = "4.0", features = ["derive"] }
 ratatui = { version = "0.29", features = ["crossterm"] }
 ratatui-image = "4"
+image = "0.25"
+
+[build-dependencies]
 image = "0.25"

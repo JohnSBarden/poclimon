@@ -181,15 +181,10 @@ impl App {
         }
     }
 
-    /// Tick all animators and expire stale notifications.
-    ///
-    /// Protocol encoding is deferred to `render_pen` where the actual
-    /// `Rect` is known — avoids wasted allocations before the first draw.
     pub fn update_all_displays(&mut self) {
         for slot in &mut self.slots {
             slot.animator.tick();
         }
-        // Advance XP for creatures that are actively eating or playing.
         self.tick_xp();
         self.update_startup_loads();
         self.update_swap_transition();
@@ -218,49 +213,36 @@ impl App {
         for slot in &mut self.slots {
             let state = slot.animator.state();
 
-            // Only accrue XP while eating or playing.
             let is_xp_state = matches!(
                 state,
                 crate::animation::AnimationState::Eating
                     | crate::animation::AnimationState::Playing
             );
-
             if !is_xp_state {
-                // Not in an XP-earning state — nothing to do this tick.
-                // (anim_active_secs is reset in set_selected_state when the
-                // player switches away, so we don't touch it here.)
                 continue;
             }
 
-            // Advance the continuous activity timer.
             slot.anim_active_secs += TICK_SECS;
 
-            // Determine XP rate for the current activity duration.
+            // Rate decays over time: 2xp/s for the first 10s, 1xp/s to 40s, then 0.
             let xp_rate = if slot.anim_active_secs <= 10.0 {
-                2.0_f32 // Fast gain for the first 10 seconds
+                2.0_f32
             } else if slot.anim_active_secs <= 40.0 {
-                1.0_f32 // Slower gain for 10–40 seconds
+                1.0_f32
             } else {
-                0.0_f32 // No gain after 40 seconds (diminishing returns)
+                0.0_f32
             };
 
-            // Accumulate fractional XP using a dedicated f32 bucket.
-            //
-            // Why: at 2xp/sec each 50ms tick only earns 0.1 xp. If we floor
-            // that directly into a u32 we'd get 0 every single tick and XP
-            // would never increase. Instead we bank the raw gain in `xp_frac`
-            // and only cash whole points into `xp` once the bucket ≥ 1.0.
+            // Bank fractional XP; flush whole points to avoid flooring every tick to 0.
             slot.xp_frac += xp_rate * TICK_SECS;
             let whole = slot.xp_frac.floor() as u32;
             if whole > 0 {
                 slot.xp = slot.xp.saturating_add(whole);
-                slot.xp_frac -= whole as f32; // keep only the leftover fraction
+                slot.xp_frac -= whole as f32;
             }
 
-            // Check for level-up: threshold is 50 * current_level.
             let threshold = 50 * slot.level;
             if slot.xp >= threshold {
-                // Level up! Reset XP and increment level.
                 slot.xp = 0;
                 slot.level += 1;
                 level_up_events.push((slot.creature_name.clone(), slot.level));
@@ -298,18 +280,11 @@ impl App {
         }
     }
 
-    /// Switch the selected creature to a new animation state.
-    ///
-    /// Also resets `anim_active_secs` to 0 whenever the player moves to a
-    /// non-XP-earning state (Idle or Sleeping). This ensures XP rate always
-    /// starts fresh from the "0–10 second" fast tier when the creature goes
-    /// back to eating or playing.
     pub fn set_selected_state(&mut self, state: crate::animation::AnimationState) {
         if let Some(slot) = self.slots.get_mut(self.selected) {
             slot.animator.set_state(state);
-
-            // If the new state is NOT an XP-earning state, reset the activity
-            // timer so the next Eat/Play session starts at the fast XP rate.
+            // Reset activity timer when leaving an XP state so the next session
+            // starts at the fast tier again.
             let is_xp_state = matches!(
                 state,
                 crate::animation::AnimationState::Eating

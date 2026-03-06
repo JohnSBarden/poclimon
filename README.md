@@ -1,4 +1,6 @@
-# PoCLImon 
+# PoCLImon
+
+![Screenshot](docs/img/title.png)
 
 **Pokemon living in your terminal.** Eat, sleep, play. 🕹️
 
@@ -46,17 +48,17 @@ poclimon --config ./my-roster.toml # custom config
 
 ## Controls
 
-| Key | Action |
-|-----|--------|
-| `E` | Feed selected creature |
-| `S` | Put selected creature to sleep |
-| `I` | Return to idle |
-| `A` | Add next creature to roster |
-| `R` | Release selected creature (requires 2+ — you can't release your last one) |
-| `Tab` | Swap selected slot to next creature |
-| `←` / `→` | Cycle selection |
-| `1`–`6` | Select by slot number |
-| `Q` / `Esc` | Quit (your creatures go back into the PC) |
+| Key         | Action                                                                    |
+| ----------- | ------------------------------------------------------------------------- |
+| `E`         | Feed selected creature                                                    |
+| `S`         | Put selected creature to sleep                                            |
+| `I`         | Return to idle                                                            |
+| `A`         | Add next creature to roster                                               |
+| `R`         | Release selected creature (requires 2+ — you can't release your last one) |
+| `Tab`       | Swap selected slot to next creature                                       |
+| `←` / `→`   | Cycle selection                                                           |
+| `1`–`6`     | Select by slot number                                                     |
+| `Q` / `Esc` | Quit (your creatures go back into the PC)                                 |
 
 ---
 
@@ -79,29 +81,29 @@ creatures = ["pikachu", "eevee", "bulbasaur"]
 
 11 creatures ship ready-to-go. Hit `A` to add them live, or summon anything from the 898-strong Pokédex by Dex ID.
 
-| Name | ID | Notes |
-|------|----|-------|
-| Bulbasaur | 1 | The neglected one. |
-| Charmander | 4 | The popular one. |
-| Squirtle | 7 | The cool one. |
-| Pikachu | 25 | You know this one |
-| Eevee | 133 | Identity undecided |
-| Vaporeon | 134 | Water |
-| Jolteon | 135 | Electric (the best original 150 poke, statistically) |
-| Flareon | 136 | Fire (the worst Eeveelution, statistically) |
-| Articuno | 144 | Legendary. Rarely seen in the wild. |
-| Zapdos | 145 | Legendary. Lives near the power plant. |
-| Moltres | 146 | Legendary. Do not touch. |
+| Name       | ID  |
+| ---------- | --- |
+| Bulbasaur  | 1   |
+| Charmander | 4   |
+| Squirtle   | 7   |
+| Pikachu    | 25  |
+| Eevee      | 133 |
+| Vaporeon   | 134 |
+| Jolteon    | 135 |
+| Flareon    | 136 |
+| Articuno   | 144 |
+| Zapdos     | 145 |
+| Moltres    | 146 |
 
 ---
 
 ## Terminal Compatibility
 
-| Terminal | Protocol | Notes |
-|----------|----------|-------|
-| Ghostty, Kitty | Kitty graphics | It's super effective |
-| iTerm2 | iTerm2 inline | It's super effective |
-| WezTerm, foot | Sixel | Very effective |
+| Terminal                  | Protocol          | Notes                            |
+| ------------------------- | ----------------- | -------------------------------- |
+| Ghostty, Kitty            | Kitty graphics    | It's super effective             |
+| iTerm2                    | iTerm2 inline     | It's super effective             |
+| WezTerm, foot             | Sixel             | Very effective                   |
 | Alacritty, macOS Terminal | Halfblock unicode | Not very effective, but it works |
 
 ---
@@ -110,4 +112,4 @@ creatures = ["pikachu", "eevee", "bulbasaur"]
 
 Sprites from [PMDCollab SpriteCollab](https://sprites.pmdcollab.org/) — community PMD sprite sheets, licensed **CC BY-NC**.
 
-Pokémon is a trademark of Nintendo / Game Freak / The Pokémon Company. This project is unofficial and non-commercial. Professor Oak does not endorse it.
+Pokémon is a trademark of Nintendo / Game Freak / The Pokémon Company. This project is unofficial and non-commercial. For funsies. 🫰

@@ -42,7 +42,6 @@ pub fn extract_frames(sheet: &DynamicImage, anim_info: &AnimInfo, dir_row: u32) 
     for col in 0..frame_count {
         let x = col as u32 * fw;
 
-        // Make sure we don't go out of bounds horizontally
         if x + fw > sheet_w {
             break;
         }
@@ -80,16 +79,13 @@ pub fn normalize_frames(
             if fw == target_w && fh == target_h {
                 return frame;
             }
-            // Create transparent canvas of target size
             let mut canvas = DynamicImage::ImageRgba8(RgbaImage::new(target_w, target_h));
-            // Center the frame on the canvas (may crop if frame is larger)
             let dst_x = (target_w as i32 - fw as i32).max(0) as u32 / 2;
             let dst_y = (target_h as i32 - fh as i32).max(0) as u32 / 2;
             let src_x = (fw as i32 - target_w as i32).max(0) as u32 / 2;
             let src_y = (fh as i32 - target_h as i32).max(0) as u32 / 2;
             let copy_w = fw.min(target_w);
             let copy_h = fh.min(target_h);
-            // Copy the (possibly cropped) frame into the canvas
             let cropped = frame.crop_imm(src_x, src_y, copy_w, copy_h);
             let _ = canvas.copy_from(&cropped, dst_x, dst_y);
             canvas

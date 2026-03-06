@@ -361,12 +361,9 @@ pub fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<Stri
     };
     slot.cached_hop = hop_frames_by_dir;
 
-    // Give the animator timing-only Animation objects (no pixel data).
     slot.animator = crate::animation::Animator::new();
     slot.animator
         .load_animations(idle_timing, eat_timing, sleep_timing);
-    // Wire up the Playing / Hop timing separately (separate setter to keep
-    // load_animations signature stable).
     slot.animator.set_hop_animation(hop_timing);
 
     // Invalidate encoded frames so that first render re-encodes for the actual Rect.
@@ -448,7 +445,6 @@ pub fn load_and_scale_animation(
         }
     };
 
-    // Step 1: scale by the display scale factor (Nearest-neighbor, RGBA8).
     let scaled: Vec<image::DynamicImage> = raw_frames
         .into_iter()
         .map(|f| {
@@ -462,14 +458,11 @@ pub fn load_and_scale_animation(
         })
         .collect();
 
-    // Step 2: cap to MAX_CACHED_FRAMES (evenly-spaced sampling if needed).
     let (capped_frames, capped_durations) = cap_frames(scaled, raw_durations);
 
-    // Record dimensions after scaling (before optional normalization).
     let scaled_w = capped_frames.first().map(|f| f.width()).unwrap_or(0);
     let scaled_h = capped_frames.first().map(|f| f.height()).unwrap_or(0);
 
-    // Step 3: normalize to canonical size if provided.
     let final_frames = match canonical_size {
         Some((cw, ch)) => sprite_sheet::normalize_frames(capped_frames, cw, ch),
         None => capped_frames,
@@ -478,7 +471,6 @@ pub fn load_and_scale_animation(
     let out_w = final_frames.first().map(|f| f.width()).unwrap_or(scaled_w);
     let out_h = final_frames.first().map(|f| f.height()).unwrap_or(scaled_h);
 
-    // Build a timing-only Animation aligned to final frame count.
     let timing = Animation::new(final_frames.len(), &capped_durations);
 
     Ok((final_frames, timing, out_w, out_h, is_fallback))
@@ -591,7 +583,6 @@ pub fn encode_halfblock_frame(
     let ph = area.height as u32 * 2; // halfblock: 2 pixel-rows per terminal row
     // Lanczos3 gives sharp edges — important for small pixel counts.
     let resized = img.resize(pw, ph, FilterType::Lanczos3);
-    // Center the resized sprite on a transparent canvas of the exact target size.
     let ox = pw.saturating_sub(resized.width()) / 2;
     let oy = ph.saturating_sub(resized.height()) / 2;
     let mut canvas = image::DynamicImage::ImageRgba8(image::RgbaImage::new(pw, ph));

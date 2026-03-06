@@ -205,7 +205,6 @@ impl CreatureSlot {
                 new_vy
             };
 
-            // Check whether the new direction is different from the old one.
             let old_dir = velocity_to_dir(self.vel_x, self.vel_y);
             let new_dir = velocity_to_dir(new_vx, new_vy);
             if new_dir != old_dir {
@@ -434,7 +433,6 @@ pub fn resolve_collisions(
                         slots[j].pos_x -= push;
                     }
 
-                    // Bounce away from each other on X.
                     if j_is_right {
                         slots[i].vel_x = -slots[i].vel_x.abs();
                         slots[j].vel_x = slots[j].vel_x.abs();
@@ -454,7 +452,6 @@ pub fn resolve_collisions(
                         slots[j].pos_y -= push;
                     }
 
-                    // Bounce away from each other on Y.
                     if j_is_below {
                         slots[i].vel_y = -slots[i].vel_y.abs();
                         slots[j].vel_y = slots[j].vel_y.abs();

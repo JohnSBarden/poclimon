@@ -32,7 +32,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match GameConfig::from_creature_name(name) {
             Ok(c) => c,
             Err(e) => {
-                // TUI not yet active; eprintln! is safe here.
                 eprintln!("Warning: {e} — using default");
                 GameConfig::default()
             }
@@ -53,8 +52,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut app = App::new(config);
 
-    // Start sprite loads in background threads — game loop renders immediately
-    // while sprites arrive. Slots show "Loading…" until their worker completes.
     app.start_background_loads();
 
     let res = run_app(&mut terminal, &mut app, &mut picker);
@@ -64,7 +61,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     terminal.show_cursor()?;
 
     if let Err(e) = res {
-        // TUI has been torn down; eprintln! is safe here.
         eprintln!("Error: {e}");
     }
 
@@ -77,6 +73,25 @@ fn run_app(
     picker: &mut Picker,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let frame_duration = std::time::Duration::from_millis(50);
+
+    // Splash: ~2 seconds (40 ticks × 50ms); any keypress skips it.
+    'splash: for _ in 0..40u32 {
+        app.update_all_displays();
+        terminal.draw(ui::render_splash)?;
+        if event::poll(frame_duration)?
+            && let Event::Key(KeyEvent {
+                code,
+                kind: KeyEventKind::Press,
+                ..
+            }) = event::read()?
+        {
+            if matches!(code, KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc) {
+                app.running = false;
+                break 'splash;
+            }
+            break 'splash;
+        }
+    }
 
     while app.running {
         app.update_all_displays();
@@ -123,7 +138,7 @@ fn run_app(
                                 app.prompt_buffer.push(c);
                             }
                         }
-                        _ => {} // ignore other keys while prompt is active
+                        _ => {}
                     }
                 }
                 // ── Normal game controls ───────────────────────────────────────
