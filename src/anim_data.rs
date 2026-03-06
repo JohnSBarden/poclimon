@@ -56,21 +56,17 @@ impl AnimInfo {
 pub fn parse_anim_data(xml: &str) -> HashMap<String, AnimInfo> {
     let mut result = HashMap::new();
 
-    // Split on <Anim> tags to get each animation block
     for anim_block in xml.split("<Anim>").skip(1) {
-        // Find the end of this block
         let block = match anim_block.split("</Anim>").next() {
             Some(b) => b,
             None => continue,
         };
 
-        // Extract name (used as the HashMap key)
         let name = match extract_tag_value(block, "Name") {
             Some(n) => n,
             None => continue,
         };
 
-        // Extract frame dimensions
         let frame_width = match extract_tag_value(block, "FrameWidth") {
             Some(v) => match v.parse::<u32>() {
                 Ok(n) => n,
@@ -87,7 +83,6 @@ pub fn parse_anim_data(xml: &str) -> HashMap<String, AnimInfo> {
             None => continue,
         };
 
-        // Extract durations
         let durations = extract_durations(block);
         if durations.is_empty() {
             continue;
