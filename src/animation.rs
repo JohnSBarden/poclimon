@@ -1,36 +1,37 @@
-//! Sprite sheet-based animation system.
-//!
-//! Replaces the old programmatic animation (squash/stretch, pixel manipulation)
-//! with proper pre-rendered sprite sheet animations from PMDCollab.
-//!
-//! Each animation state (Idle, Eating, Sleeping, Playing) plays a corresponding
-//! sprite sheet animation. All states loop infinitely.
-//!
-//! # Memory layout
-//!
-//! `Animation` is **timing-only** — it tracks frame durations but stores
-//! no pixel data. Actual frame images live exclusively in `CreatureSlot`'s
-//! `cached_idle / cached_eat / cached_sleep / cached_hop` vectors. This eliminates
-//! the double-storage that existed in v0.0.2, where frames were kept both in
-//! `Animator.idle_anim.frames` and in the slot cache.
+//! Timing-only animation: frame durations without pixel data.
 
 use std::time::Instant;
 
 /// The creature's current animation state.
 ///
 /// Each variant maps to a specific sprite sheet and a slot in
-/// `CreatureSlot::encoded_frames` (0=Idle, 1=Eat, 2=Sleep, 3=Recall, 4=Playing).
+/// `CreatureSlot::sprites.encoded` (0=Idle, 1=Eat, 2=Sleep, 3=Recall, 4=Playing).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnimationState {
-    /// Standing around, wandering the pen. Frame index 0.
+    /// Standing around, wandering the pen.
     Idle,
-    /// Eating — creature plays the "Eat" animation. Frame index 1.
+    /// Eating — creature plays the "Eat" animation.
     Eating,
-    /// Sleeping. Frame index 2.
+    /// Sleeping.
     Sleeping,
     /// Playing / hopping around. Uses the "Hop" animation from PMDCollab.
-    /// Frame index 4 in `encoded_frames`. Earns XP just like Eating.
+    /// Earns XP just like Eating.
     Playing,
+}
+
+impl AnimationState {
+    /// Return the index into `SpriteCache::encoded` for this state.
+    ///
+    /// Recall (index 3) is a transition visual, not a game state, so it is
+    /// not represented here and callers must use the literal `3` for it.
+    pub fn encoded_index(self) -> usize {
+        match self {
+            AnimationState::Idle    => 0,
+            AnimationState::Eating  => 1,
+            AnimationState::Sleeping => 2,
+            AnimationState::Playing => 4,
+        }
+    }
 }
 
 /// Timing information for one animation cycle (no pixel data stored here).
@@ -153,14 +154,6 @@ impl Animator {
         }
     }
 
-    /// Advance the animation. Call this each frame.
-    ///
-    /// All animation states loop infinitely; this method no longer triggers
-    /// automatic state transitions. Always returns `false`.
-    pub fn tick(&mut self) -> bool {
-        false
-    }
-
     /// Get the current frame index based on elapsed time.
     ///
     /// Returns `None` if no timing data has been loaded yet.
@@ -239,8 +232,8 @@ mod tests {
     }
 
     #[test]
-    fn test_eating_loops_infinitely() {
-        // Eating should loop just like Idle and Sleep — no automatic return to Idle.
+    fn test_eating_state_is_stable() {
+        // Eating should not spontaneously transition back to Idle.
         let mut animator = Animator::new();
         animator.load_animations(
             make_test_animation(),
@@ -248,17 +241,12 @@ mod tests {
             make_test_animation(),
         );
         animator.set_state(AnimationState::Eating);
-        // tick() should never change the state back to Idle
-        for _ in 0..1000 {
-            let changed = animator.tick();
-            assert!(!changed, "tick() must not trigger state transitions");
-            assert_eq!(animator.state(), AnimationState::Eating);
-        }
+        assert_eq!(animator.state(), AnimationState::Eating);
     }
 
     #[test]
-    fn test_playing_loops_infinitely() {
-        // Playing should loop just like other states — no automatic return to Idle.
+    fn test_playing_state_is_stable() {
+        // Playing should not spontaneously transition to another state.
         let mut animator = Animator::new();
         animator.load_animations(
             make_test_animation(),
@@ -267,11 +255,15 @@ mod tests {
         );
         animator.set_hop_animation(make_test_animation());
         animator.set_state(AnimationState::Playing);
-        for _ in 0..1000 {
-            let changed = animator.tick();
-            assert!(!changed, "tick() must not trigger state transitions");
-            assert_eq!(animator.state(), AnimationState::Playing);
-        }
+        assert_eq!(animator.state(), AnimationState::Playing);
+    }
+
+    #[test]
+    fn test_encoded_index() {
+        assert_eq!(AnimationState::Idle.encoded_index(), 0);
+        assert_eq!(AnimationState::Eating.encoded_index(), 1);
+        assert_eq!(AnimationState::Sleeping.encoded_index(), 2);
+        assert_eq!(AnimationState::Playing.encoded_index(), 4);
     }
 
     #[test]

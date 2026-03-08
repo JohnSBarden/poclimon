@@ -9,9 +9,6 @@ pub const NOTIF_TTL_SECS: u64 = 8;
 /// Severity level for an in-TUI notification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NotifLevel {
-    // Info is currently used in tests and reserved for future informational
-    // messages (e.g., successful sprite downloads).
-    #[allow(dead_code)]
     Info,
     Warn,
     Error,

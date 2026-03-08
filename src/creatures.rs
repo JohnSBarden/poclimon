@@ -22,11 +22,12 @@ pub fn padded_id(id: u32) -> String {
     format!("{id:04}")
 }
 
-/// All creatures available in PoCLImon.
+/// Default selectable creatures available in PoCLImon.
 ///
 /// IDs correspond to National Pokédex numbers. Sprites are sourced from
 /// the PMDCollab SpriteCollab repository and cached locally on first use.
-pub const ROSTER: &[CreatureDef] = &[
+/// Not to be confused with the user's active session roster (`App::slots`).
+pub const DEFAULT_CREATURES: &[CreatureDef] = &[
     // Gen 1 starters
     CreatureDef { id: 1,   name: "Bulbasaur"  },
     CreatureDef { id: 4,   name: "Charmander" },
@@ -46,8 +47,7 @@ pub const ROSTER: &[CreatureDef] = &[
 
 /// Find a creature by ID.
 pub fn find_by_id(id: u32) -> Option<&'static CreatureDef> {
-    // Check ROSTER first (has full struct), then FULL_DEX for name-only lookup.
-    ROSTER.iter().find(|c| c.id == id)
+    DEFAULT_CREATURES.iter().find(|c| c.id == id)
 }
 
 /// Look up just the display name for any National Dex ID (Gen 1–9).
@@ -337,7 +337,7 @@ pub const FULL_DEX: &[(u32, &str)] = &[
 /// Find a creature by name (case-insensitive).
 pub fn find_by_name(name: &str) -> Option<&'static CreatureDef> {
     let lower = name.to_lowercase();
-    ROSTER.iter().find(|c| c.name.to_lowercase() == lower)
+    DEFAULT_CREATURES.iter().find(|c| c.name.to_lowercase() == lower)
 }
 
 #[cfg(test)]
@@ -345,8 +345,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_roster_has_eleven_creatures() {
-        assert_eq!(ROSTER.len(), 11);
+    fn test_default_creatures_has_eleven_entries() {
+        assert_eq!(DEFAULT_CREATURES.len(), 11);
     }
 
     #[test]

@@ -1,8 +1,4 @@
-//! Parser for PMDCollab AnimData.xml files.
-//!
-//! Each creature in the PMDCollab sprite repository has an AnimData.xml that
-//! describes every available animation: frame dimensions and per-frame durations.
-//! We parse this to know how to cut up sprite sheets and time animations.
+//! Parser for PMDCollab AnimData.xml.
 
 use std::collections::HashMap;
 

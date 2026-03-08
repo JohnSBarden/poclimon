@@ -93,39 +93,6 @@ pub fn normalize_frames(
         .collect()
 }
 
-/// Normalize a set of frames to the given target dimensions using
-/// nearest-neighbor scaling.
-///
-/// Legacy scaling variant — kept for reference. Prefer `normalize_frames`
-/// (padding) to avoid distorting pixel art.
-///
-/// If a frame is already the target size it is returned as-is without copying.
-#[allow(dead_code)]
-pub fn normalize_frames_scale(
-    frames: Vec<DynamicImage>,
-    target_w: u32,
-    target_h: u32,
-) -> Vec<DynamicImage> {
-    if target_w == 0 || target_h == 0 {
-        return frames;
-    }
-    frames
-        .into_iter()
-        .map(|frame| {
-            if frame.width() == target_w && frame.height() == target_h {
-                frame
-            } else {
-                DynamicImage::ImageRgba8(image::imageops::resize(
-                    &frame,
-                    target_w,
-                    target_h,
-                    image::imageops::FilterType::Nearest,
-                ))
-            }
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

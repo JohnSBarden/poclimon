@@ -4,26 +4,6 @@ use ratatui_image::protocol::Protocol;
 use std::io::Write;
 use std::sync::Mutex;
 
-// ── Memory budget ──────────────────────────────────────────────────────────────
-//
-// v0.0.2 stored frames TWICE: once in `Animator.{idle,eat,sleep}_anim.frames`
-// and once in `CreatureSlot.cached_*`.  At scale=6 each frame was 240×336×4 ≈
-// 323 KB, so 3 anims × ~6 frames × 2 copies ≈ 11.6 MB per creature × 5 = 58 MB.
-//
-// v0.0.3 fixes:
-//   1. Scale default 6 → 3:  frames shrink by 6²/3² = 4×.
-//   2. Frame cap at 8 per animation: limits long PMDCollab animations.
-//   3. `Animation` is now timing-only — no pixel data. Frames live exclusively
-//      in `CreatureSlot::cached_*`.  Double-storage eliminated.
-//   4. Protocol pre-encoding: switch from StatefulProtocol (stores full
-//      DynamicImage in the protocol) to Protocol (stores only encoded halfblock
-//      data). All frames are encoded once for a given Rect and reused every
-//      frame, eliminating alloc/free churn.
-//
-// Expected working set at scale=3, ≤8 frames, 5 creatures:
-//   ~40 KB/encoded-frame × 8 frames × 3 anims × 5 creatures ≈ 4.8 MB total.
-//   Zero DynamicImage copies held in protocol objects.
-
 /// Maximum frames to cache per animation.  If the sprite sheet has more,
 /// we sample evenly-spaced frames so the animation still looks smooth.
 pub const MAX_CACHED_FRAMES: usize = 8;
@@ -44,6 +24,59 @@ pub const OVERLAP_STACK_THRESHOLD: f32 = 0.60;
 pub const RECALL_TICKS: u8 = 18;
 pub const RECALL_FLASH_SHRINK_DELAY_TICKS: u8 = 10;
 
+/// Cardinal direction a creature is facing.
+///
+/// The index value corresponds to the direction row used for array lookups:
+/// 0=Down, 1=Left, 2=Up, 3=Right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Down  = 0,
+    Left  = 1,
+    Up    = 2,
+    Right = 3,
+}
+
+impl Direction {
+    /// Return the array index for this direction (0–3).
+    pub fn as_index(self) -> usize {
+        self as usize
+    }
+}
+
+/// All pixel frames and terminal-encoded protocols for a single creature slot.
+///
+/// Collects the 5 animation caches (Idle/Eat/Sleep/Recall/Hop) and their
+/// pre-encoded `Protocol` objects into one place, reducing `CreatureSlot` from
+/// 7 separate cache fields to a single named group.
+pub struct SpriteCache {
+    pub idle:   [Vec<DynamicImage>; 4],
+    pub eat:    [Vec<DynamicImage>; 4],
+    pub sleep:  [Vec<DynamicImage>; 4],
+    pub recall: [Vec<DynamicImage>; 4],
+    pub hop:    [Vec<DynamicImage>; 4],
+    /// Pre-encoded Protocol objects indexed by [state_index][dir_index][frame_index].
+    /// state 0=Idle, 1=Eat, 2=Sleep, 3=Recall, 4=Playing (Hop).
+    /// dir: 0=Down, 1=Left, 2=Up, 3=Right.
+    pub encoded: [[Vec<Option<Protocol>>; 4]; 5],
+    /// The size `Rect` (position 0,0) these protocols were encoded for.
+    /// `None` means not yet encoded. Position-independent — re-encode only on resize.
+    pub encoded_rect: Option<ratatui::layout::Rect>,
+}
+
+impl SpriteCache {
+    pub fn new() -> Self {
+        Self {
+            idle:   std::array::from_fn(|_| Vec::new()),
+            eat:    std::array::from_fn(|_| Vec::new()),
+            sleep:  std::array::from_fn(|_| Vec::new()),
+            recall: std::array::from_fn(|_| Vec::new()),
+            hop:    std::array::from_fn(|_| Vec::new()),
+            encoded: std::array::from_fn(|_| std::array::from_fn(|_| Vec::new())),
+            encoded_rect: None,
+        }
+    }
+}
+
 /// A single creature slot in the shared-pen display.
 ///
 /// Pixel data lives here; the animator only knows timing/state.
@@ -51,27 +84,8 @@ pub struct CreatureSlot {
     pub creature_id: u32,
     pub creature_name: String,
     pub animator: Animator,
-    /// Pre-scaled, normalized frames for the Idle animation, indexed by direction.
-    /// [dir_idx][frame_idx] where dir: 0=Down, 1=Left, 2=Up, 3=Right
-    pub cached_idle: [Vec<DynamicImage>; 4],
-    /// Pre-scaled, normalized frames for the Eat animation, indexed by direction.
-    pub cached_eat: [Vec<DynamicImage>; 4],
-    /// Pre-scaled, normalized frames for the Sleep animation, indexed by direction.
-    pub cached_sleep: [Vec<DynamicImage>; 4],
-    /// Pre-scaled, normalized frames for recall animation, preferring Spin and
-    /// falling back to Rotate, then Idle.
-    pub cached_recall: [Vec<DynamicImage>; 4],
-    /// Pre-scaled, normalized frames for the Playing / "Hop" animation.
-    /// Falls back to Idle frames when the Hop sheet is missing from PMDCollab
-    /// (same pattern as Eat/Sleep fallback), so the creature always has smooth
-    /// movement even without a dedicated hop sprite.
-    pub cached_hop: [Vec<DynamicImage>; 4],
-    /// Pre-encoded Protocol objects, indexed by [state_index][dir_index][frame_index].
-    /// state 0 = Idle, 1 = Eat, 2 = Sleep, 3 = Recall, 4 = Playing (Hop).
-    /// dir: 0=Down, 1=Left, 2=Up, 3=Right.
-    /// `None` entries mean encoding failed for that frame (fallback shown).
-    /// Rebuilt whenever `encoded_rect` changes (terminal resize or first render).
-    pub encoded_frames: [[Vec<Option<Protocol>>; 4]; 5],
+    /// All sprite frames and terminal-encoded protocols for this slot.
+    pub sprites: SpriteCache,
     /// Current experience points earned by this creature (whole numbers).
     /// Increases while the creature is Eating or Playing. Resets to 0 on level-up.
     pub xp: u32,
@@ -90,9 +104,6 @@ pub struct CreatureSlot {
     /// stops at 40s. Resets to 0.0 whenever the state switches away from
     /// Eating/Playing.
     pub anim_active_secs: f32,
-    /// The size `Rect` (position 0,0) these protocols were encoded for.
-    /// `None` means not yet encoded. Position-independent — re-encode only on resize.
-    pub encoded_rect: Option<ratatui::layout::Rect>,
     /// Current X position in terminal cells, relative to pen_inner.x.
     pub pos_x: f32,
     /// Current Y position in terminal cells, relative to pen_inner.y.
@@ -101,8 +112,8 @@ pub struct CreatureSlot {
     pub vel_x: f32,
     /// Vertical velocity in cells per 50ms tick.
     pub vel_y: f32,
-    /// Current direction index: 0=Down, 1=Left, 2=Up, 3=Right.
-    pub current_dir: usize,
+    /// Current facing direction.
+    pub current_dir: Direction,
     /// Ticks remaining holding the current direction before picking a new one.
     /// When it hits 0, pick a new velocity and reset to a random 2-8 second hold.
     pub dir_hold_ticks: u32,
@@ -123,21 +134,12 @@ impl CreatureSlot {
             creature_id,
             creature_name,
             animator: Animator::new(),
-            cached_idle: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
-            cached_eat: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
-            cached_sleep: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
-            cached_recall: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
-            // Hop starts empty; filled by load_slot_sprites. Falls back to Idle
-            // frames if the Hop sheet is missing.
-            cached_hop: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
-            // 5 states: Idle=0, Eat=1, Sleep=2, Recall=3, Playing=4.
-            encoded_frames: std::array::from_fn(|_| std::array::from_fn(|_| Vec::new())),
-            encoded_rect: None,
+            sprites: SpriteCache::new(),
             pos_x: 0.0,
             pos_y: 0.0,
             vel_x: 0.0,
             vel_y: 0.0,
-            current_dir: 0,
+            current_dir: Direction::Down,
             dir_hold_ticks: 0,
             pause_ticks: 0,
             pause_face_down: false,
@@ -148,6 +150,48 @@ impl CreatureSlot {
             level: 1,
             anim_active_secs: 0.0,
         }
+    }
+
+    /// Accrue XP for one 50ms tick. Returns the new level if the creature leveled up.
+    ///
+    /// Only accrues XP while in an XP-earning state (Eating or Playing).
+    /// XP rate decays over time: 2xp/s for first 10s, 1xp/s to 40s, then 0.
+    pub fn tick_xp(&mut self) -> Option<u32> {
+        const TICK_SECS: f32 = 0.05;
+
+        let is_xp_state = matches!(
+            self.animator.state(),
+            crate::animation::AnimationState::Eating | crate::animation::AnimationState::Playing
+        );
+        if !is_xp_state {
+            return None;
+        }
+
+        self.anim_active_secs += TICK_SECS;
+
+        let xp_rate = if self.anim_active_secs <= 10.0 {
+            2.0_f32
+        } else if self.anim_active_secs <= 40.0 {
+            1.0_f32
+        } else {
+            0.0_f32
+        };
+
+        self.xp_frac += xp_rate * TICK_SECS;
+        let whole = self.xp_frac.floor() as u32;
+        if whole > 0 {
+            self.xp = self.xp.saturating_add(whole);
+            self.xp_frac -= whole as f32;
+        }
+
+        let threshold = 50 * self.level;
+        if self.xp >= threshold {
+            self.xp = 0;
+            self.level += 1;
+            return Some(self.level);
+        }
+
+        None
     }
 
     /// Update position and movement timers for one 50ms tick.
@@ -165,8 +209,6 @@ impl CreatureSlot {
         use rand::Rng;
         let mut rng = rand::thread_rng();
 
-        // ── Direction-change pause ───────────────────────────────────────────
-        // Creature stands still briefly when switching direction.
         if self.dir_cooldown_ticks > 0 {
             self.dir_cooldown_ticks -= 1;
         }
@@ -179,16 +221,14 @@ impl CreatureSlot {
                 self.pause_face_down = false;
                 debug_log(format!(
                     "pause_end id={} dir={} vx={:.3} vy={:.3}",
-                    self.creature_id, self.current_dir, self.vel_x, self.vel_y
+                    self.creature_id, self.current_dir.as_index(), self.vel_x, self.vel_y
                 ));
             } else if self.pause_face_down {
-                self.current_dir = 0;
+                self.current_dir = Direction::Down;
             }
             return; // Frozen in place — no movement or timer updates this tick.
         }
 
-        // ── Direction hold timer ─────────────────────────────────────────────
-        // When the hold timer hits 0, pick a new direction.
         if self.dir_hold_ticks == 0 {
             let new_vx = rng.gen_range(-0.4_f32..=0.4);
             let new_vy = rng.gen_range(-0.4_f32..=0.4);
@@ -212,15 +252,15 @@ impl CreatureSlot {
                 self.pause_ticks = rng.gen_range(20_u32..40);
                 self.pause_face_down = rng.gen_bool(0.30);
                 if self.pause_face_down {
-                    self.current_dir = 0;
+                    self.current_dir = Direction::Down;
                 } else {
                     self.current_dir = old_dir;
                 }
                 debug_log(format!(
                     "heading_change id={} old_dir={} new_dir={} hold={} pause={} face_down={}",
                     self.creature_id,
-                    old_dir,
-                    new_dir,
+                    old_dir.as_index(),
+                    new_dir.as_index(),
                     self.dir_hold_ticks,
                     self.pause_ticks,
                     self.pause_face_down
@@ -238,7 +278,7 @@ impl CreatureSlot {
                 self.dir_cooldown_ticks = 3;
                 debug_log(format!(
                     "heading_apply id={} dir={} vx={:.3} vy={:.3}",
-                    self.creature_id, self.current_dir, self.vel_x, self.vel_y
+                    self.creature_id, self.current_dir.as_index(), self.vel_x, self.vel_y
                 ));
             }
 
@@ -248,7 +288,6 @@ impl CreatureSlot {
             self.dir_hold_ticks -= 1;
         }
 
-        // ── Position update (only when in Idle animation) ────────────────────
         if !is_moving {
             return; // Eating/sleeping: timers tick but position is frozen.
         }
@@ -266,7 +305,7 @@ impl CreatureSlot {
             self.vel_x = self.vel_x.abs();
             debug_log(format!(
                 "wall_bounce id={} axis=x dir={} vx={:.3} vy={:.3}",
-                self.creature_id, self.current_dir, self.vel_x, self.vel_y
+                self.creature_id, self.current_dir.as_index(), self.vel_x, self.vel_y
             ));
         }
         if self.pos_x > max_x {
@@ -274,7 +313,7 @@ impl CreatureSlot {
             self.vel_x = -self.vel_x.abs();
             debug_log(format!(
                 "wall_bounce id={} axis=x dir={} vx={:.3} vy={:.3}",
-                self.creature_id, self.current_dir, self.vel_x, self.vel_y
+                self.creature_id, self.current_dir.as_index(), self.vel_x, self.vel_y
             ));
         }
         if self.pos_y < 0.0 {
@@ -282,7 +321,7 @@ impl CreatureSlot {
             self.vel_y = self.vel_y.abs();
             debug_log(format!(
                 "wall_bounce id={} axis=y dir={} vx={:.3} vy={:.3}",
-                self.creature_id, self.current_dir, self.vel_x, self.vel_y
+                self.creature_id, self.current_dir.as_index(), self.vel_x, self.vel_y
             ));
         }
         if self.pos_y > max_y {
@@ -290,7 +329,7 @@ impl CreatureSlot {
             self.vel_y = -self.vel_y.abs();
             debug_log(format!(
                 "wall_bounce id={} axis=y dir={} vx={:.3} vy={:.3}",
-                self.creature_id, self.current_dir, self.vel_x, self.vel_y
+                self.creature_id, self.current_dir.as_index(), self.vel_x, self.vel_y
             ));
         }
     }
@@ -327,35 +366,35 @@ pub fn sprite_stack_h(sprite_h: u16) -> u16 {
     sprite_h + LABEL_H - LABEL_OVERLAP
 }
 
-/// Map velocity to a cardinal direction index.
-/// Returns: 0=Down, 1=Left, 2=Up, 3=Right
-pub fn velocity_to_dir(vel_x: f32, vel_y: f32) -> usize {
+/// Map velocity to a cardinal direction.
+/// Returns: Down, Left, Up, or Right.
+pub fn velocity_to_dir(vel_x: f32, vel_y: f32) -> Direction {
     if vel_x.abs() < 0.01 && vel_y.abs() < 0.01 {
-        return 0; // stationary → face down
+        return Direction::Down; // stationary → face down
     }
     if vel_x.abs() > vel_y.abs() {
-        if vel_x > 0.0 { 3 } else { 1 } // Right : Left
+        if vel_x > 0.0 { Direction::Right } else { Direction::Left }
     } else if vel_y > 0.0 {
-        2 // Up
+        Direction::Up
     } else {
-        0 // Down
+        Direction::Down
     }
 }
 
 /// Direction mapping with hysteresis to avoid rapid up/down flips while
 /// mostly moving left/right (and vice-versa).
-pub fn stable_velocity_to_dir(vel_x: f32, vel_y: f32, current_dir: usize) -> usize {
+pub fn stable_velocity_to_dir(vel_x: f32, vel_y: f32, current_dir: Direction) -> Direction {
     let ax = vel_x.abs();
     let ay = vel_y.abs();
     let threshold = 0.12;
     let new_dir = if ax < threshold && ay < threshold {
         current_dir // Keep current if barely moving
     } else if ax > ay {
-        if vel_x > 0.0 { 3 } else { 1 }
+        if vel_x > 0.0 { Direction::Right } else { Direction::Left }
     } else if vel_y > 0.0 {
-        2
+        Direction::Up
     } else {
-        0
+        Direction::Down
     };
     // Only change if crossing diagonal threshold
     if new_dir != current_dir {
@@ -387,7 +426,7 @@ pub fn maybe_update_facing_from_velocity(slot: &mut CreatureSlot) {
         slot.dir_cooldown_ticks = 5;
         debug_log(format!(
             "facing_update id={} dir={} vx={:.3} vy={:.3}",
-            slot.creature_id, slot.current_dir, slot.vel_x, slot.vel_y
+            slot.creature_id, slot.current_dir.as_index(), slot.vel_x, slot.vel_y
         ));
     }
 }
@@ -467,8 +506,8 @@ pub fn resolve_collisions(
                     slots[j].creature_id,
                     overlap_x,
                     overlap_y,
-                    slots[i].current_dir,
-                    slots[j].current_dir,
+                    slots[i].current_dir.as_index(),
+                    slots[j].current_dir.as_index(),
                     slots[i].vel_x,
                     slots[i].vel_y,
                     slots[j].vel_x,
@@ -487,4 +526,3 @@ pub fn resolve_collisions(
         slot.pos_y = slot.pos_y.clamp(0.0, max_y);
     }
 }
-

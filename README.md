@@ -53,9 +53,10 @@ poclimon --config ./my-roster.toml # custom config
 | `E`         | Feed selected creature                                                    |
 | `S`         | Put selected creature to sleep                                            |
 | `I`         | Return to idle                                                            |
-| `A`         | Add next creature to roster                                               |
+| `A`         | Add a creature (enter Pokédex ID)                                         |
 | `R`         | Release selected creature (requires 2+ — you can't release your last one) |
-| `Tab`       | Swap selected slot to next creature                                       |
+| `Tab`       | Swap selected creature (enter Pokédex ID)                                 |
+| `P`         | Play with selected creature                                               |
 | `←` / `→`   | Cycle selection                                                           |
 | `1`–`6`     | Select by slot number                                                     |
 | `Q` / `Esc` | Quit (your creatures go back into the PC)                                 |
