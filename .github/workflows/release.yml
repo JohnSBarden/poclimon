@@ -1,0 +1,92 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Bump version and publish
+    if: |
+      github.actor != 'github-actions[bot]' &&
+      !contains(github.event.head_commit.message, '[skip ci]')
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run tests (gate)
+        run: cargo test
+
+      - name: Compute next version
+        id: bump
+        shell: bash
+        run: |
+          LAST_TAG=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' \
+                     --sort=-version:refname | head -1)
+          [[ -z "$LAST_TAG" ]] && LAST_TAG=$(git rev-list --max-parents=0 HEAD)
+
+          COMMITS=$(git log "${LAST_TAG}..HEAD" --format='%s')
+          if [[ -z "$COMMITS" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+          FULL_LOG=$(git log "${LAST_TAG}..HEAD" --format='%B')
+          BUMP="patch"
+          if echo "$FULL_LOG" | grep -qE 'BREAKING[[:space:]]CHANGE'; then
+            BUMP="major"
+          elif echo "$COMMITS" | grep -qE '^feat(\(.+\))?(!:|\:)'; then
+            BUMP="minor"
+          fi
+
+          CURRENT=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+          MINOR=$(echo "$CURRENT" | cut -d. -f2)
+          PATCH=$(echo "$CURRENT" | cut -d. -f3)
+          case "$BUMP" in
+            major) MAJOR=$((MAJOR+1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR+1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH+1)) ;;
+          esac
+
+          NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          echo "new_version=$NEW_VERSION"     >> "$GITHUB_OUTPUT"
+          echo "new_tag=v${NEW_VERSION}"      >> "$GITHUB_OUTPUT"
+
+      - name: Update Cargo.toml
+        if: steps.bump.outputs.skip != 'true'
+        run: |
+          sed -i "0,/^version = \"[^\"]*\"/s//version = \"${{ steps.bump.outputs.new_version }}\"/" Cargo.toml
+
+      - name: Regenerate Cargo.lock
+        if: steps.bump.outputs.skip != 'true'
+        run: cargo generate-lockfile
+
+      - name: Commit, tag, push
+        if: steps.bump.outputs.skip != 'true'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore(release): ${{ steps.bump.outputs.new_tag }} [skip ci]"
+          git tag "${{ steps.bump.outputs.new_tag }}"
+          git push origin main
+          git push origin "${{ steps.bump.outputs.new_tag }}"
+
+      - name: Publish to crates.io
+        if: steps.bump.outputs.skip != 'true'
+        run: cargo publish --token "${{ secrets.CARGO_REGISTRY_TOKEN }}"
