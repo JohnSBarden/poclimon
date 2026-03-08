@@ -403,7 +403,7 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
                     let x = render_x + sprite_w.saturating_sub(w) / 2;
                     let y = render_y + sprite_h.saturating_sub(h) / 2;
                     img_area = Rect::new(x, y, w, h);
-                    white_flash = shrink_phase % 2 == 0;
+                    white_flash = shrink_phase.is_multiple_of(2);
                 }
             } else if !worker_done {
                 render_waiting_ball = true;
@@ -626,13 +626,11 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
             && toy_x + tw <= px + pen_inner.width as i32
             && toy_y + th <= py + pen_inner.height as i32;
 
-        if fits {
-            if let Some(proto) = app.toy_proto.as_mut() {
-                f.render_widget(
-                    Image::new(proto),
-                    Rect::new(toy_x as u16, toy_y as u16, TOY_W, toy_h),
-                );
-            }
+        if fits && let Some(proto) = app.toy_proto.as_mut() {
+            f.render_widget(
+                Image::new(proto),
+                Rect::new(toy_x as u16, toy_y as u16, TOY_W, toy_h),
+            );
         }
     }
 }
@@ -665,11 +663,11 @@ fn pick_protocol_index(
         if let Some(fi) = pick_from_dir_index(&encoded[s][dir_idx], frame_idx) {
             return Some((s, dir_idx, fi));
         }
-        for d in 0..4 {
+        for (d, enc_d) in encoded[s].iter().enumerate().take(4) {
             if d == dir_idx {
                 continue;
             }
-            if let Some(fi) = pick_from_dir_index(&encoded[s][d], frame_idx) {
+            if let Some(fi) = pick_from_dir_index(enc_d, frame_idx) {
                 return Some((s, d, fi));
             }
         }
