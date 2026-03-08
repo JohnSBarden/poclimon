@@ -24,9 +24,6 @@ pub struct App {
     pub slots: Vec<CreatureSlot>,
     pub selected: usize,
     pub running: bool,
-    /// Index into `creatures::ROSTER` used by the `A` key (old cycle behavior).
-    #[allow(dead_code)]
-    pub next_add_index: usize,
     /// In-TUI notification messages (replaces eprintln! during TUI operation).
     pub notifications: VecDeque<Notification>,
     pub swap_transition: Option<SwapTransition>,
@@ -46,6 +43,10 @@ pub struct App {
     pub prompt_mode: PromptMode,
     /// Characters typed so far in the active prompt.
     pub prompt_buffer: String,
+    /// Pen dimensions (width, height, sprite_h) from the most recent render.
+    /// Set by `render_pen` each frame; used by `update_physics` on the next tick.
+    /// `None` until the first render completes.
+    pub pen_dims: Option<(u16, u16, u16)>,
 }
 
 impl App {
@@ -57,15 +58,14 @@ impl App {
             .collect();
 
         const TOY_PNG: &[u8] = include_bytes!("../assets/poke_doll.png");
-        let toy_image = image::load_from_memory(TOY_PNG)
-            .expect("bundled poke_doll.png is a valid PNG");
+        let toy_image =
+            image::load_from_memory(TOY_PNG).expect("bundled poke_doll.png is a valid PNG");
 
         Self {
             config,
             slots,
             selected: 0,
             running: true,
-            next_add_index: 0,
             notifications: VecDeque::new(),
             swap_transition: None,
             add_transition: None,
@@ -75,6 +75,7 @@ impl App {
             toy_proto_rect: None,
             prompt_mode: PromptMode::None,
             prompt_buffer: String::new(),
+            pen_dims: None,
         }
     }
 
@@ -101,10 +102,6 @@ impl App {
     }
 
     /// Kick off background sprite loads for every slot in the initial roster.
-    ///
-    /// Returns immediately so the game loop can render its first frame at once.
-    /// Slots show "Loading…" until their worker finishes and `update_startup_loads`
-    /// swaps in the populated slot.
     pub fn start_background_loads(&mut self) {
         let scale = self.config.scale;
         for (idx, slot) in self.slots.iter().enumerate() {
@@ -127,22 +124,17 @@ impl App {
     }
 
     /// Poll completed startup loads and apply them.
-    ///
-    /// Physics state (position, velocity, direction) is copied from the current
-    /// slot so the creature doesn't teleport when sprites arrive. If the slot's
-    /// creature was swapped before the load finished, the stale result is dropped.
     fn update_startup_loads(&mut self) {
         let mut completions: Vec<(usize, u32, SwapWorkerResult)> = Vec::new();
-        self.startup_loads.retain(|(slot_index, creature_id, rx)| {
-            match rx.try_recv() {
+        self.startup_loads
+            .retain(|(slot_index, creature_id, rx)| match rx.try_recv() {
                 Ok(result) => {
                     completions.push((*slot_index, *creature_id, result));
                     false
                 }
                 Err(mpsc::TryRecvError::Empty) => true,
                 Err(mpsc::TryRecvError::Disconnected) => false,
-            }
-        });
+            });
         for (slot_index, expected_id, result) in completions {
             match result {
                 SwapWorkerResult::Loaded { mut slot, warnings } => {
@@ -182,9 +174,7 @@ impl App {
     }
 
     pub fn update_all_displays(&mut self) {
-        for slot in &mut self.slots {
-            slot.animator.tick();
-        }
+        self.update_physics();
         self.tick_xp();
         self.update_startup_loads();
         self.update_swap_transition();
@@ -192,64 +182,53 @@ impl App {
         self.expire_notifications(Duration::from_secs(crate::notification::NOTIF_TTL_SECS));
     }
 
-    /// Accrue XP for all slots currently in an XP-earning state (Eating or Playing).
+    /// Advance physics for all slots using the pen dimensions from the last render.
     ///
-    /// Called every game tick (50ms = 0.05 seconds). XP rate decays over time
-    /// to reward short bursts of activity rather than leaving the game AFK:
-    ///   - 0–10 s:  2 xp/sec
-    ///   - 10–40 s: 1 xp/sec
-    ///   - 40+ s:   0 xp/sec
-    ///
-    /// When a creature collects enough XP it levels up, its XP resets to 0,
-    /// and a notification appears in the status panel.
-    pub fn tick_xp(&mut self) {
-        // Each game tick is 50ms = 0.05 seconds.
-        const TICK_SECS: f32 = 0.05;
+    /// Skips slots not yet initialized (no prior render). Called once per game tick.
+    fn update_physics(&mut self) {
+        let Some((pen_w, pen_h, sprite_h)) = self.pen_dims else {
+            return;
+        };
+        let transition_slot_index = self.transition_slot_index();
 
-        // We can't borrow self.slots and self.notifications mutably at the
-        // same time, so collect level-up events and emit them after the loop.
+        for (i, slot) in self.slots.iter_mut().enumerate() {
+            if slot.sprites.encoded_rect.is_none() {
+                continue; // Not yet initialized — skip until first render.
+            }
+            let is_moving = matches!(
+                slot.animator.state(),
+                crate::animation::AnimationState::Idle
+            ) && transition_slot_index != Some(i);
+            slot.update_position(pen_w, pen_h, crate::creature::SPRITE_W, sprite_h, is_moving);
+        }
+
+        crate::creature::resolve_collisions(
+            &mut self.slots,
+            crate::creature::SPRITE_W,
+            crate::creature::sprite_stack_h(sprite_h),
+            pen_w,
+            pen_h,
+        );
+
+        for slot in &mut self.slots {
+            crate::creature::maybe_update_facing_from_velocity(slot);
+        }
+    }
+
+    /// Accrue XP for all slots and emit level-up notifications.
+    ///
+    /// Delegates per-slot math to `CreatureSlot::tick_xp`. We can't borrow
+    /// `self.slots` and `self.notifications` mutably at the same time, so
+    /// level-up events are collected first and emitted after the slot loop.
+    pub fn tick_xp(&mut self) {
         let mut level_up_events: Vec<(String, u32)> = Vec::new();
 
         for slot in &mut self.slots {
-            let state = slot.animator.state();
-
-            let is_xp_state = matches!(
-                state,
-                crate::animation::AnimationState::Eating
-                    | crate::animation::AnimationState::Playing
-            );
-            if !is_xp_state {
-                continue;
-            }
-
-            slot.anim_active_secs += TICK_SECS;
-
-            // Rate decays over time: 2xp/s for the first 10s, 1xp/s to 40s, then 0.
-            let xp_rate = if slot.anim_active_secs <= 10.0 {
-                2.0_f32
-            } else if slot.anim_active_secs <= 40.0 {
-                1.0_f32
-            } else {
-                0.0_f32
-            };
-
-            // Bank fractional XP; flush whole points to avoid flooring every tick to 0.
-            slot.xp_frac += xp_rate * TICK_SECS;
-            let whole = slot.xp_frac.floor() as u32;
-            if whole > 0 {
-                slot.xp = slot.xp.saturating_add(whole);
-                slot.xp_frac -= whole as f32;
-            }
-
-            let threshold = 50 * slot.level;
-            if slot.xp >= threshold {
-                slot.xp = 0;
-                slot.level += 1;
-                level_up_events.push((slot.creature_name.clone(), slot.level));
+            if let Some(new_level) = slot.tick_xp() {
+                level_up_events.push((slot.creature_name.clone(), new_level));
             }
         }
 
-        // Emit level-up notifications now that we're no longer borrowing slots.
         for (name, level) in level_up_events {
             self.notify(
                 NotifLevel::Info,
@@ -302,68 +281,6 @@ impl App {
 
     pub fn has_background_load(&self) -> bool {
         self.swap_transition.is_some() || self.add_transition.is_some()
-    }
-
-    /// Add the next available creature (not already in roster) to the end.
-    ///
-    /// Cycles through `creatures::ROSTER` in order, skipping IDs already
-    /// present.  Does nothing when all creatures are already in the roster
-    /// or the roster is already at the display limit (6 slots).
-    #[allow(dead_code)]
-    pub fn add_creature(&mut self) {
-        if self.has_background_load() {
-            self.notify(
-                NotifLevel::Warn,
-                "Please wait for the current load to finish",
-            );
-            return;
-        }
-        // Cap at 6 for the pen renderer.
-        if self.slots.len() >= MAX_ACTIVE_CREATURES {
-            return;
-        }
-
-        let current_ids: std::collections::HashSet<u32> =
-            self.slots.iter().map(|s| s.creature_id).collect();
-
-        // Find the next creature not already in the roster, starting from
-        // `next_add_index` and wrapping around ROSTER once.
-        let roster = crate::creatures::ROSTER;
-        let start = self.next_add_index % roster.len();
-        let candidate = (start..roster.len())
-            .chain(0..start)
-            .find(|&i| !current_ids.contains(&roster[i].id));
-
-        let Some(idx) = candidate else {
-            // All ROSTER creatures are already on screen.
-            return;
-        };
-
-        let creature = &roster[idx];
-        self.next_add_index = (idx + 1) % roster.len();
-
-        let target_id = creature.id;
-        let target_name = creature.name.to_string();
-        let worker_target_name = target_name.clone();
-        let scale = self.config.scale;
-        let (tx, rx) = mpsc::channel::<SwapWorkerResult>();
-        std::thread::spawn(move || {
-            let mut slot = CreatureSlot::new(target_id, worker_target_name);
-            let msg = match crate::sprite_loading::load_slot_sprites(&mut slot, scale) {
-                Ok(warnings) => SwapWorkerResult::Loaded {
-                    slot: Box::new(slot),
-                    warnings,
-                },
-                Err(e) => SwapWorkerResult::Failed(e.to_string()),
-            };
-            let _ = tx.send(msg);
-        });
-
-        self.add_transition = Some(AddTransition {
-            target_name,
-            worker_rx: rx,
-            worker_result: None,
-        });
     }
 
     /// Remove the currently selected slot from the roster.
@@ -485,55 +402,6 @@ impl App {
             self.add_transition = None;
             self.notify(NotifLevel::Error, err);
         }
-    }
-
-    /// Cycle the creature in the selected slot through all `creatures::ROSTER`
-    /// entries, wrapping around. Recall animation plays while sprites load in
-    /// the background and then the slot swaps without freezing the app.
-    #[allow(dead_code)]
-    pub fn cycle_selected_creature(&mut self) {
-        if self.has_background_load() {
-            self.notify(NotifLevel::Warn, "A creature load is already in progress");
-            return;
-        }
-
-        let Some(slot) = self.slots.get(self.selected) else {
-            return;
-        };
-
-        let current_id = slot.creature_id;
-        let roster = crate::creatures::ROSTER;
-
-        let current_pos = roster.iter().position(|c| c.id == current_id).unwrap_or(0);
-
-        let next_pos = (current_pos + 1) % roster.len();
-        let next = &roster[next_pos];
-        let selected_index = self.selected;
-        let target_id = next.id;
-        let target_name = next.name.to_string();
-        let worker_target_name = target_name.clone();
-        let scale = self.config.scale;
-
-        let (tx, rx) = mpsc::channel::<SwapWorkerResult>();
-        std::thread::spawn(move || {
-            let mut new_slot = CreatureSlot::new(target_id, worker_target_name);
-            let msg = match crate::sprite_loading::load_slot_sprites(&mut new_slot, scale) {
-                Ok(warnings) => SwapWorkerResult::Loaded {
-                    slot: Box::new(new_slot),
-                    warnings,
-                },
-                Err(e) => SwapWorkerResult::Failed(e.to_string()),
-            };
-            let _ = tx.send(msg);
-        });
-
-        self.swap_transition = Some(SwapTransition {
-            slot_index: selected_index,
-            recall_ticks: RECALL_TICKS,
-            target_name,
-            worker_rx: rx,
-            worker_result: None,
-        });
     }
 
     /// Add a creature by National Pokédex number.

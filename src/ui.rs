@@ -1,6 +1,6 @@
 use crate::animation::AnimationState;
 use crate::app::{App, PromptMode};
-use crate::creature::{LABEL_H, LABEL_OVERLAP, SPRITE_H, SPRITE_H_HALFBLOCKS, SPRITE_W};
+use crate::creature::{Direction, LABEL_H, LABEL_OVERLAP, SPRITE_H, SPRITE_H_HALFBLOCKS, SPRITE_W};
 use crate::notification::NotifLevel;
 use crate::sprite_loading::encode_all_frames;
 use ratatui::{
@@ -49,7 +49,9 @@ pub fn render_splash(f: &mut Frame<'_>) {
                         ),
                         (false, true) => Span::styled(
                             "▄",
-                            Style::default().fg(Color::Rgb(br, bg_r, bb)).bg(Color::Reset),
+                            Style::default()
+                                .fg(Color::Rgb(br, bg_r, bb))
+                                .bg(Color::Reset),
                         ),
                         (false, false) => Span::raw(" "),
                     }
@@ -90,7 +92,11 @@ pub fn render_splash(f: &mut Frame<'_>) {
 
     f.render_widget(
         Paragraph::new("@JohnSBarden")
-            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+            .style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
             .alignment(Alignment::Center),
         chunks[5],
     );
@@ -234,10 +240,11 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
     f.render_widget(status, chunks[2]);
 
     // Help bar
-    let help =
-        Paragraph::new("[E]at [S]leep [I]dle [P]lay [←/→] [1-6] [A]dd # [Tab]Swap # [R]emove [Q]uit")
-            .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default().borders(Borders::ALL));
+    let help = Paragraph::new(
+        "[E]at [S]leep [I]dle [P]lay [←/→] [1-6] [A]dd # [Tab]Swap # [R]emove [Q]uit",
+    )
+    .style(Style::default().fg(Color::DarkGray))
+    .block(Block::default().borders(Borders::ALL));
     f.render_widget(help, chunks[3]);
 
     // Prompt overlay — appears centered over the pen area when Add or Swap is active.
@@ -282,18 +289,7 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
     }
 }
 
-// ── Shared pen rendering ───────────────────────────────────────────────────────
-
-/// Render all creatures in a single shared pen with no internal borders.
-///
-/// A single outer border wraps the pen area. Creatures wander freely using
-/// `pos_x`/`pos_y` + `vel_x`/`vel_y`, bouncing off walls, overlapping freely
-/// (later slots render on top). Name labels follow each sprite.
-///
-/// Sprite protocols are encoded at a fixed size `(sprite_w, sprite_h)` at
-/// position `(0,0)` — position-independent. They are only re-encoded when
-/// pen size changes (terminal resize). At render time the widget is
-/// placed at the creature's current position.
+/// Render all creatures in a single shared pen.
 pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker) {
     let count = app.slots.len();
     if count == 0 {
@@ -321,15 +317,17 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
         SPRITE_H
     };
 
+    // Publish pen dimensions so update_physics can use them next tick.
+    app.pen_dims = Some((pen_inner.width, pen_inner.height, sprite_h));
+
     // Size rect used for protocol encoding (position 0,0 — decoupled from render pos).
     let size_rect = Rect::new(0, 0, sprite_w, sprite_h);
 
-    // Phase 1: initialize positions, update movement, and set direction for all slots.
     for i in 0..count {
         let slot = &mut app.slots[i];
 
         // First time this slot enters the pen: randomize position and velocity.
-        if slot.encoded_rect.is_none() {
+        if slot.sprites.encoded_rect.is_none() {
             use rand::Rng;
             let mut rng = rand::thread_rng();
             let max_px = (pen_inner.width.saturating_sub(sprite_w)) as f32;
@@ -360,43 +358,11 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
             slot.dir_hold_ticks = rng.gen_range(40_u32..160);
         }
 
-        // Update position for this tick (frozen during eating/sleeping).
-        // Direction is locked inside update_position when a new heading is picked.
-        let is_moving = matches!(slot.animator.state(), AnimationState::Idle)
-            && transition_slot_index != Some(i);
-        slot.update_position(
-            pen_inner.width,
-            pen_inner.height,
-            sprite_w,
-            sprite_h,
-            is_moving,
-        );
-        if slot.current_dir > 3 {
-            crate::creature::debug_log(format!(
-                "bad_dir id={} dir={} vx={:.3} vy={:.3}",
-                slot.creature_id, slot.current_dir, slot.vel_x, slot.vel_y
-            ));
-            slot.current_dir =
-                crate::creature::stable_velocity_to_dir(slot.vel_x, slot.vel_y, slot.current_dir);
-        }
-
         // Lazily encode (or re-encode on resize) — compare size only, not position.
-        if slot.encoded_rect != Some(size_rect) {
+        // Physics updates have been moved to App::update_physics (called each tick).
+        if slot.sprites.encoded_rect != Some(size_rect) {
             encode_all_frames(slot, picker, size_rect);
         }
-    }
-
-    // Phase 2: resolve creature-to-creature collisions (elastic bounce).
-    crate::creature::resolve_collisions(
-        &mut app.slots,
-        SPRITE_W,
-        crate::creature::sprite_stack_h(sprite_h),
-        pen_inner.width,
-        pen_inner.height,
-    );
-
-    for slot in &mut app.slots {
-        crate::creature::maybe_update_facing_from_velocity(slot);
     }
 
     // ── Phase 3a: render all sprites ──────────────────────────────────────────────
@@ -405,16 +371,8 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
 
         let state = slot.animator.state();
         let mut frame_idx = slot.animator.current_frame_index().unwrap_or(0);
-        // Map AnimationState → encoded_frames index.
-        // Must stay in sync with the order in encode_all_frames:
-        //   0=Idle, 1=Eat, 2=Sleep, 3=Recall, 4=Playing.
-        let mut state_idx = match state {
-            AnimationState::Idle => 0,
-            AnimationState::Eating => 1,
-            AnimationState::Sleeping => 2,
-            AnimationState::Playing => 4,
-        };
-        let dir_idx = slot.current_dir;
+        let mut state_idx = state.encoded_index();
+        let dir_idx = slot.current_dir.as_index();
 
         let render_x = (pen_inner.x + slot.pos_x.round() as u16)
             .min(pen_inner.x + pen_inner.width.saturating_sub(sprite_w));
@@ -445,7 +403,7 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
                     let x = render_x + sprite_w.saturating_sub(w) / 2;
                     let y = render_y + sprite_h.saturating_sub(h) / 2;
                     img_area = Rect::new(x, y, w, h);
-                    white_flash = shrink_phase % 2 == 0;
+                    white_flash = shrink_phase.is_multiple_of(2);
                 }
             } else if !worker_done {
                 render_waiting_ball = true;
@@ -471,10 +429,10 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
             continue;
         }
 
-        match pick_protocol_index(&slot.encoded_frames, state_idx, dir_idx, frame_idx) {
+        match pick_protocol_index(&slot.sprites.encoded, state_idx, dir_idx, frame_idx) {
             Some((picked_state, picked_dir, picked_frame)) => {
                 if let Some(protocol) =
-                    slot.encoded_frames[picked_state][picked_dir][picked_frame].as_mut()
+                    slot.sprites.encoded[picked_state][picked_dir][picked_frame].as_mut()
                 {
                     f.render_widget(Image::new(protocol), img_area);
                 } else {
@@ -495,10 +453,10 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
                     state_idx,
                     dir_idx,
                     frame_idx,
-                    slot.encoded_frames[state_idx][0].len(),
-                    slot.encoded_frames[state_idx][1].len(),
-                    slot.encoded_frames[state_idx][2].len(),
-                    slot.encoded_frames[state_idx][3].len()
+                    slot.sprites.encoded[state_idx][0].len(),
+                    slot.sprites.encoded[state_idx][1].len(),
+                    slot.sprites.encoded[state_idx][2].len(),
+                    slot.sprites.encoded[state_idx][3].len()
                 ));
                 f.render_widget(
                     Paragraph::new("Loading…").style(Style::default().fg(Color::DarkGray)),
@@ -561,8 +519,8 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
         // ratio (e.g. a square sprite in a 32×10 area only fills ~18 columns).
         // Halfblock always fills the full sprite_w. Use Protocol::area().width to
         // get the true rendered width rather than guessing from font metrics.
-        let actual_sprite_w = pick_protocol_index(&slot.encoded_frames, 0, 0, 0)
-            .and_then(|(si, di, fi)| slot.encoded_frames[si][di][fi].as_ref())
+        let actual_sprite_w = pick_protocol_index(&slot.sprites.encoded, 0, 0, 0)
+            .and_then(|(si, di, fi)| slot.sprites.encoded[si][di][fi].as_ref())
             .map(|p| p.area().width)
             .unwrap_or(sprite_w);
         let label_x = render_x + (actual_sprite_w.saturating_sub(label_w) / 2);
@@ -638,8 +596,8 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
         );
 
         // Use the true rendered sprite width (same as nameplate logic).
-        let actual_sprite_w = pick_protocol_index(&slot.encoded_frames, 0, 0, 0)
-            .and_then(|(si, di, fi)| slot.encoded_frames[si][di][fi].as_ref())
+        let actual_sprite_w = pick_protocol_index(&slot.sprites.encoded, 0, 0, 0)
+            .and_then(|(si, di, fi)| slot.sprites.encoded[si][di][fi].as_ref())
             .map(|p| p.area().width)
             .unwrap_or(sprite_w);
 
@@ -652,13 +610,13 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
 
         let (toy_x, toy_y) = match slot.current_dir {
             // Down  — just below, horizontally centred on the sprite
-            0 => (rx + sw / 2 - tw / 2, ry + sh),
+            Direction::Down => (rx + sw / 2 - tw / 2, ry + sh),
             // Left  — face on right side of the Left sprite → toy to the right
-            1 => (rx + sw, ry + sh / 2 - th / 2),
+            Direction::Left => (rx + sw, ry + sh / 2 - th / 2),
             // Up    — just above, horizontally centred on the sprite
-            2 => (rx + sw / 2 - tw / 2, ry - th),
+            Direction::Up => (rx + sw / 2 - tw / 2, ry - th),
             // Right — face on left side of the Right sprite → toy to the left
-            _ => (rx - tw, ry + sh / 2 - th / 2),
+            Direction::Right => (rx - tw, ry + sh / 2 - th / 2),
         };
 
         let px = pen_inner.x as i32;
@@ -668,13 +626,11 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
             && toy_x + tw <= px + pen_inner.width as i32
             && toy_y + th <= py + pen_inner.height as i32;
 
-        if fits {
-            if let Some(proto) = app.toy_proto.as_mut() {
-                f.render_widget(
-                    Image::new(proto),
-                    Rect::new(toy_x as u16, toy_y as u16, TOY_W, toy_h),
-                );
-            }
+        if fits && let Some(proto) = app.toy_proto.as_mut() {
+            f.render_widget(
+                Image::new(proto),
+                Rect::new(toy_x as u16, toy_y as u16, TOY_W, toy_h),
+            );
         }
     }
 }
@@ -685,7 +641,7 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
 /// 3) any direction in requested state
 /// 4) any direction in Idle state
 ///
-/// The array has 5 states: 0=Idle, 1=Eat, 2=Sleep, 3=Recall, 4=Playing.
+/// The array has 5 states: 0=Idle, 1=Eat, 2=Sleep, 3=Recall, 4=Playing (Hop).
 fn pick_protocol_index(
     encoded: &[[Vec<Option<Protocol>>; 4]; 5],
     state_idx: usize,
@@ -707,11 +663,11 @@ fn pick_protocol_index(
         if let Some(fi) = pick_from_dir_index(&encoded[s][dir_idx], frame_idx) {
             return Some((s, dir_idx, fi));
         }
-        for d in 0..4 {
+        for (d, enc_d) in encoded[s].iter().enumerate().take(4) {
             if d == dir_idx {
                 continue;
             }
-            if let Some(fi) = pick_from_dir_index(&encoded[s][d], frame_idx) {
+            if let Some(fi) = pick_from_dir_index(enc_d, frame_idx) {
                 return Some((s, d, fi));
             }
         }

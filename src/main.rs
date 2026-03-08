@@ -106,41 +106,39 @@ fn run_app(
         {
             match code {
                 // ── Prompt intercept — handles all keys when a prompt is open ──
-                _ if app.prompt_mode != app::PromptMode::None => {
-                    match code {
-                        KeyCode::Esc => {
-                            app.prompt_mode = app::PromptMode::None;
-                            app.prompt_buffer.clear();
-                        }
-                        KeyCode::Enter => {
-                            let buf = app.prompt_buffer.trim().to_string();
-                            let mode = app.prompt_mode;
-                            app.prompt_mode = app::PromptMode::None;
-                            app.prompt_buffer.clear();
-                            if let Ok(id) = buf.parse::<u32>() {
-                                match mode {
-                                    app::PromptMode::Add => app.add_creature_by_dex(id),
-                                    app::PromptMode::Swap => app.swap_selected_to_dex(id),
-                                    app::PromptMode::None => {}
-                                }
-                            } else {
-                                app.notify(
-                                    notification::NotifLevel::Warn,
-                                    "Invalid Pokédex number — enter digits only",
-                                );
-                            }
-                        }
-                        KeyCode::Backspace => {
-                            app.prompt_buffer.pop();
-                        }
-                        KeyCode::Char(c) if c.is_ascii_digit() => {
-                            if app.prompt_buffer.len() < 4 {
-                                app.prompt_buffer.push(c);
-                            }
-                        }
-                        _ => {}
+                _ if app.prompt_mode != app::PromptMode::None => match code {
+                    KeyCode::Esc => {
+                        app.prompt_mode = app::PromptMode::None;
+                        app.prompt_buffer.clear();
                     }
-                }
+                    KeyCode::Enter => {
+                        let buf = app.prompt_buffer.trim().to_string();
+                        let mode = app.prompt_mode;
+                        app.prompt_mode = app::PromptMode::None;
+                        app.prompt_buffer.clear();
+                        if let Ok(id) = buf.parse::<u32>() {
+                            match mode {
+                                app::PromptMode::Add => app.add_creature_by_dex(id),
+                                app::PromptMode::Swap => app.swap_selected_to_dex(id),
+                                app::PromptMode::None => {}
+                            }
+                        } else {
+                            app.notify(
+                                notification::NotifLevel::Warn,
+                                "Invalid Pokédex number — enter digits only",
+                            );
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        app.prompt_buffer.pop();
+                    }
+                    KeyCode::Char(c) if c.is_ascii_digit() => {
+                        if app.prompt_buffer.len() < 4 {
+                            app.prompt_buffer.push(c);
+                        }
+                    }
+                    _ => {}
+                },
                 // ── Normal game controls ───────────────────────────────────────
                 KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
                     app.running = false;

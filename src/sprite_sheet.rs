@@ -24,7 +24,11 @@ use image::{DynamicImage, GenericImage, GenericImageView, RgbaImage};
 /// The caller is responsible for fallback handling.
 ///
 /// Returns a `Vec` of cropped frame images, one per frame in the animation.
-pub fn extract_frames(sheet: &DynamicImage, anim_info: &AnimInfo, dir_row: u32) -> Vec<DynamicImage> {
+pub fn extract_frames(
+    sheet: &DynamicImage,
+    anim_info: &AnimInfo,
+    dir_row: u32,
+) -> Vec<DynamicImage> {
     let frame_count = anim_info.frame_count();
     let fw = anim_info.frame_width;
     let fh = anim_info.frame_height;
@@ -93,39 +97,6 @@ pub fn normalize_frames(
         .collect()
 }
 
-/// Normalize a set of frames to the given target dimensions using
-/// nearest-neighbor scaling.
-///
-/// Legacy scaling variant — kept for reference. Prefer `normalize_frames`
-/// (padding) to avoid distorting pixel art.
-///
-/// If a frame is already the target size it is returned as-is without copying.
-#[allow(dead_code)]
-pub fn normalize_frames_scale(
-    frames: Vec<DynamicImage>,
-    target_w: u32,
-    target_h: u32,
-) -> Vec<DynamicImage> {
-    if target_w == 0 || target_h == 0 {
-        return frames;
-    }
-    frames
-        .into_iter()
-        .map(|frame| {
-            if frame.width() == target_w && frame.height() == target_h {
-                frame
-            } else {
-                DynamicImage::ImageRgba8(image::imageops::resize(
-                    &frame,
-                    target_w,
-                    target_h,
-                    image::imageops::FilterType::Nearest,
-                ))
-            }
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,9 +114,9 @@ mod tests {
 
         // Color row 0 frames distinctly
         let colors = [
-            Rgba([255, 0, 0, 255]),   // Frame 0: red
-            Rgba([0, 255, 0, 255]),   // Frame 1: green
-            Rgba([0, 0, 255, 255]),   // Frame 2: blue
+            Rgba([255, 0, 0, 255]), // Frame 0: red
+            Rgba([0, 255, 0, 255]), // Frame 1: green
+            Rgba([0, 0, 255, 255]), // Frame 2: blue
         ];
 
         for col in 0..cols {

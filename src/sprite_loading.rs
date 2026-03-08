@@ -36,13 +36,10 @@ pub struct AddTransition {
 
 /// Cap a frame list to at most `MAX_CACHED_FRAMES`, selecting evenly-spaced
 /// frames so the animation remains representative.
-///
-/// Also truncates `durations` to match `frames` in case they differ (defensive).
 pub fn cap_frames(
     frames: Vec<image::DynamicImage>,
     durations: Vec<u32>,
 ) -> (Vec<image::DynamicImage>, Vec<u32>) {
-    // Align lengths defensively.
     let n = frames.len().min(durations.len());
     let mut frames = frames;
     let mut durations = durations;
@@ -118,7 +115,7 @@ pub fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<Stri
     )
     .map(|r| r.0)
     .unwrap_or_else(|_| idle_down.clone());
-    slot.cached_idle = [idle_down.clone(), idle_left, idle_up, idle_right];
+    slot.sprites.idle = [idle_down.clone(), idle_left, idle_up, idle_right];
 
     // Try Eat dir 0 first to get fallback status.
     let (eat_down_raw, eat_timing_raw, _, _, eat_fallback) = load_and_scale_animation(
@@ -131,7 +128,7 @@ pub fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<Stri
     )?;
     let (eat_frames_by_dir, eat_timing) = if eat_fallback {
         // Reuse Idle frames for all 4 directions
-        (slot.cached_idle.clone(), idle_timing.clone())
+        (slot.sprites.idle.clone(), idle_timing.clone())
     } else {
         let eat_left = load_and_scale_animation(
             "Eat",
@@ -165,7 +162,7 @@ pub fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<Stri
         .unwrap_or_else(|_| eat_down_raw.clone());
         ([eat_down_raw, eat_left, eat_up, eat_right], eat_timing_raw)
     };
-    slot.cached_eat = eat_frames_by_dir;
+    slot.sprites.eat = eat_frames_by_dir;
 
     // Try Sleep dir 0 first to get fallback status.
     let (sleep_down_raw, sleep_timing_raw, _, _, sleep_fallback) = load_and_scale_animation(
@@ -178,7 +175,7 @@ pub fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<Stri
     )?;
     let (sleep_frames_by_dir, sleep_timing) = if sleep_fallback {
         // Reuse Idle frames for all 4 directions
-        (slot.cached_idle.clone(), idle_timing.clone())
+        (slot.sprites.idle.clone(), idle_timing.clone())
     } else {
         let sleep_left = load_and_scale_animation(
             "Sleep",
@@ -215,7 +212,7 @@ pub fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<Stri
             sleep_timing_raw,
         )
     };
-    slot.cached_sleep = sleep_frames_by_dir;
+    slot.sprites.sleep = sleep_frames_by_dir;
 
     // Recall animation for swap transitions:
     // prefer Spin -> fallback Rotate -> fallback Idle.
@@ -306,11 +303,11 @@ pub fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<Stri
                     "Rotate",
                 )
             } else {
-                (slot.cached_idle.clone(), "Idle")
+                (slot.sprites.idle.clone(), "Idle")
             }
         }
     };
-    slot.cached_recall = recall_frames_by_dir;
+    slot.sprites.recall = recall_frames_by_dir;
 
     // ── Hop (Playing) animation ───────────────────────────────────────────────
     // Try to load "Hop" from PMDCollab. Falls back to Idle frames when missing,
@@ -325,7 +322,7 @@ pub fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<Stri
     )?;
     let (hop_frames_by_dir, hop_timing) = if hop_fallback {
         // No Hop sheet — reuse Idle frames so Playing looks like a livelier Idle.
-        (slot.cached_idle.clone(), idle_timing.clone())
+        (slot.sprites.idle.clone(), idle_timing.clone())
     } else {
         let hop_left = load_and_scale_animation(
             "Hop",
@@ -359,7 +356,7 @@ pub fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<Stri
         .unwrap_or_else(|_| hop_down_raw.clone());
         ([hop_down_raw, hop_left, hop_up, hop_right], hop_timing_raw)
     };
-    slot.cached_hop = hop_frames_by_dir;
+    slot.sprites.hop = hop_frames_by_dir;
 
     slot.animator = crate::animation::Animator::new();
     slot.animator
@@ -367,9 +364,9 @@ pub fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<Stri
     slot.animator.set_hop_animation(hop_timing);
 
     // Invalidate encoded frames so that first render re-encodes for the actual Rect.
-    slot.encoded_rect = None;
+    slot.sprites.encoded_rect = None;
     // 5 states: Idle=0, Eat=1, Sleep=2, Recall=3, Playing=4.
-    slot.encoded_frames = std::array::from_fn(|_| std::array::from_fn(|_| Vec::new()));
+    slot.sprites.encoded = std::array::from_fn(|_| std::array::from_fn(|_| Vec::new()));
 
     // Filter out warnings for animations we gracefully handled via Idle fallback
     // or optional recall animation fallbacks (Spin/Rotate/Hop).
@@ -494,18 +491,18 @@ pub fn load_and_scale_animation(
 /// and cached per-slot.
 pub fn encode_all_frames(slot: &mut CreatureSlot, picker: &Picker, area: ratatui::layout::Rect) {
     // Clone caches to avoid simultaneous shared+mutable borrows of `slot`.
-    let idle = slot.cached_idle.clone();
-    let eat = slot.cached_eat.clone();
-    let sleep = slot.cached_sleep.clone();
-    let recall = slot.cached_recall.clone();
+    let idle = slot.sprites.idle.clone();
+    let eat = slot.sprites.eat.clone();
+    let sleep = slot.sprites.sleep.clone();
+    let recall = slot.sprites.recall.clone();
     // Hop is the 5th state (index 4 = Playing).
-    let hop = slot.cached_hop.clone();
+    let hop = slot.sprites.hop.clone();
 
     // 5 caches: Idle=0, Eat=1, Sleep=2, Recall=3, Playing/Hop=4.
     let caches: [&[Vec<image::DynamicImage>; 4]; 5] = [&idle, &eat, &sleep, &recall, &hop];
     let is_halfblocks = picker.protocol_type() == ratatui_image::picker::ProtocolType::Halfblocks;
 
-    slot.encoded_frames = std::array::from_fn(|state_idx| {
+    slot.sprites.encoded = std::array::from_fn(|state_idx| {
         let cache = caches[state_idx];
         std::array::from_fn(|dir_idx| {
             cache[dir_idx]
@@ -526,7 +523,7 @@ pub fn encode_all_frames(slot: &mut CreatureSlot, picker: &Picker, area: ratatui
                 .collect()
         })
     });
-    slot.encoded_rect = Some(area);
+    slot.sprites.encoded_rect = Some(area);
 }
 
 /// Encode an arbitrary-sized image (e.g. the poke-doll sprite) into a
@@ -556,11 +553,7 @@ pub fn encode_toy_image(
             .map(Protocol::Halfblocks)
     } else {
         picker
-            .new_protocol(
-                img.clone(),
-                area,
-                Resize::Scale(Some(FilterType::Lanczos3)),
-            )
+            .new_protocol(img.clone(), area, Resize::Scale(Some(FilterType::Lanczos3)))
             .ok()
     }
 }
