@@ -58,8 +58,8 @@ impl App {
             .collect();
 
         const TOY_PNG: &[u8] = include_bytes!("../assets/poke_doll.png");
-        let toy_image = image::load_from_memory(TOY_PNG)
-            .expect("bundled poke_doll.png is a valid PNG");
+        let toy_image =
+            image::load_from_memory(TOY_PNG).expect("bundled poke_doll.png is a valid PNG");
 
         Self {
             config,
@@ -126,16 +126,15 @@ impl App {
     /// Poll completed startup loads and apply them.
     fn update_startup_loads(&mut self) {
         let mut completions: Vec<(usize, u32, SwapWorkerResult)> = Vec::new();
-        self.startup_loads.retain(|(slot_index, creature_id, rx)| {
-            match rx.try_recv() {
+        self.startup_loads
+            .retain(|(slot_index, creature_id, rx)| match rx.try_recv() {
                 Ok(result) => {
                     completions.push((*slot_index, *creature_id, result));
                     false
                 }
                 Err(mpsc::TryRecvError::Empty) => true,
                 Err(mpsc::TryRecvError::Disconnected) => false,
-            }
-        });
+            });
         for (slot_index, expected_id, result) in completions {
             match result {
                 SwapWorkerResult::Loaded { mut slot, warnings } => {
@@ -196,9 +195,10 @@ impl App {
             if slot.sprites.encoded_rect.is_none() {
                 continue; // Not yet initialized — skip until first render.
             }
-            let is_moving =
-                matches!(slot.animator.state(), crate::animation::AnimationState::Idle)
-                    && transition_slot_index != Some(i);
+            let is_moving = matches!(
+                slot.animator.state(),
+                crate::animation::AnimationState::Idle
+            ) && transition_slot_index != Some(i);
             slot.update_position(pen_w, pen_h, crate::creature::SPRITE_W, sprite_h, is_moving);
         }
 

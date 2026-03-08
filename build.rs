@@ -97,7 +97,9 @@ fn main() {
             } else {
                 [0, 0, 0, 0]
             };
-            pairs.push((top[0], top[1], top[2], top[3], bot[0], bot[1], bot[2], bot[3]));
+            pairs.push((
+                top[0], top[1], top[2], top[3], bot[0], bot[1], bot[2], bot[3],
+            ));
         }
     }
 

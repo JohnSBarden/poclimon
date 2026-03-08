@@ -30,9 +30,9 @@ pub const RECALL_FLASH_SHRINK_DELAY_TICKS: u8 = 10;
 /// 0=Down, 1=Left, 2=Up, 3=Right.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
-    Down  = 0,
-    Left  = 1,
-    Up    = 2,
+    Down = 0,
+    Left = 1,
+    Up = 2,
     Right = 3,
 }
 
@@ -49,11 +49,11 @@ impl Direction {
 /// pre-encoded `Protocol` objects into one place, reducing `CreatureSlot` from
 /// 7 separate cache fields to a single named group.
 pub struct SpriteCache {
-    pub idle:   [Vec<DynamicImage>; 4],
-    pub eat:    [Vec<DynamicImage>; 4],
-    pub sleep:  [Vec<DynamicImage>; 4],
+    pub idle: [Vec<DynamicImage>; 4],
+    pub eat: [Vec<DynamicImage>; 4],
+    pub sleep: [Vec<DynamicImage>; 4],
     pub recall: [Vec<DynamicImage>; 4],
-    pub hop:    [Vec<DynamicImage>; 4],
+    pub hop: [Vec<DynamicImage>; 4],
     /// Pre-encoded Protocol objects indexed by [state_index][dir_index][frame_index].
     /// state 0=Idle, 1=Eat, 2=Sleep, 3=Recall, 4=Playing (Hop).
     /// dir: 0=Down, 1=Left, 2=Up, 3=Right.
@@ -66,11 +66,11 @@ pub struct SpriteCache {
 impl SpriteCache {
     pub fn new() -> Self {
         Self {
-            idle:   std::array::from_fn(|_| Vec::new()),
-            eat:    std::array::from_fn(|_| Vec::new()),
-            sleep:  std::array::from_fn(|_| Vec::new()),
+            idle: std::array::from_fn(|_| Vec::new()),
+            eat: std::array::from_fn(|_| Vec::new()),
+            sleep: std::array::from_fn(|_| Vec::new()),
             recall: std::array::from_fn(|_| Vec::new()),
-            hop:    std::array::from_fn(|_| Vec::new()),
+            hop: std::array::from_fn(|_| Vec::new()),
             encoded: std::array::from_fn(|_| std::array::from_fn(|_| Vec::new())),
             encoded_rect: None,
         }
@@ -221,7 +221,10 @@ impl CreatureSlot {
                 self.pause_face_down = false;
                 debug_log(format!(
                     "pause_end id={} dir={} vx={:.3} vy={:.3}",
-                    self.creature_id, self.current_dir.as_index(), self.vel_x, self.vel_y
+                    self.creature_id,
+                    self.current_dir.as_index(),
+                    self.vel_x,
+                    self.vel_y
                 ));
             } else if self.pause_face_down {
                 self.current_dir = Direction::Down;
@@ -278,7 +281,10 @@ impl CreatureSlot {
                 self.dir_cooldown_ticks = 3;
                 debug_log(format!(
                     "heading_apply id={} dir={} vx={:.3} vy={:.3}",
-                    self.creature_id, self.current_dir.as_index(), self.vel_x, self.vel_y
+                    self.creature_id,
+                    self.current_dir.as_index(),
+                    self.vel_x,
+                    self.vel_y
                 ));
             }
 
@@ -305,7 +311,10 @@ impl CreatureSlot {
             self.vel_x = self.vel_x.abs();
             debug_log(format!(
                 "wall_bounce id={} axis=x dir={} vx={:.3} vy={:.3}",
-                self.creature_id, self.current_dir.as_index(), self.vel_x, self.vel_y
+                self.creature_id,
+                self.current_dir.as_index(),
+                self.vel_x,
+                self.vel_y
             ));
         }
         if self.pos_x > max_x {
@@ -313,7 +322,10 @@ impl CreatureSlot {
             self.vel_x = -self.vel_x.abs();
             debug_log(format!(
                 "wall_bounce id={} axis=x dir={} vx={:.3} vy={:.3}",
-                self.creature_id, self.current_dir.as_index(), self.vel_x, self.vel_y
+                self.creature_id,
+                self.current_dir.as_index(),
+                self.vel_x,
+                self.vel_y
             ));
         }
         if self.pos_y < 0.0 {
@@ -321,7 +333,10 @@ impl CreatureSlot {
             self.vel_y = self.vel_y.abs();
             debug_log(format!(
                 "wall_bounce id={} axis=y dir={} vx={:.3} vy={:.3}",
-                self.creature_id, self.current_dir.as_index(), self.vel_x, self.vel_y
+                self.creature_id,
+                self.current_dir.as_index(),
+                self.vel_x,
+                self.vel_y
             ));
         }
         if self.pos_y > max_y {
@@ -329,7 +344,10 @@ impl CreatureSlot {
             self.vel_y = -self.vel_y.abs();
             debug_log(format!(
                 "wall_bounce id={} axis=y dir={} vx={:.3} vy={:.3}",
-                self.creature_id, self.current_dir.as_index(), self.vel_x, self.vel_y
+                self.creature_id,
+                self.current_dir.as_index(),
+                self.vel_x,
+                self.vel_y
             ));
         }
     }
@@ -373,7 +391,11 @@ pub fn velocity_to_dir(vel_x: f32, vel_y: f32) -> Direction {
         return Direction::Down; // stationary → face down
     }
     if vel_x.abs() > vel_y.abs() {
-        if vel_x > 0.0 { Direction::Right } else { Direction::Left }
+        if vel_x > 0.0 {
+            Direction::Right
+        } else {
+            Direction::Left
+        }
     } else if vel_y > 0.0 {
         Direction::Up
     } else {
@@ -390,7 +412,11 @@ pub fn stable_velocity_to_dir(vel_x: f32, vel_y: f32, current_dir: Direction) ->
     let new_dir = if ax < threshold && ay < threshold {
         current_dir // Keep current if barely moving
     } else if ax > ay {
-        if vel_x > 0.0 { Direction::Right } else { Direction::Left }
+        if vel_x > 0.0 {
+            Direction::Right
+        } else {
+            Direction::Left
+        }
     } else if vel_y > 0.0 {
         Direction::Up
     } else {
@@ -426,7 +452,10 @@ pub fn maybe_update_facing_from_velocity(slot: &mut CreatureSlot) {
         slot.dir_cooldown_ticks = 5;
         debug_log(format!(
             "facing_update id={} dir={} vx={:.3} vy={:.3}",
-            slot.creature_id, slot.current_dir.as_index(), slot.vel_x, slot.vel_y
+            slot.creature_id,
+            slot.current_dir.as_index(),
+            slot.vel_x,
+            slot.vel_y
         ));
     }
 }

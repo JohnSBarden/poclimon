@@ -24,7 +24,11 @@ use image::{DynamicImage, GenericImage, GenericImageView, RgbaImage};
 /// The caller is responsible for fallback handling.
 ///
 /// Returns a `Vec` of cropped frame images, one per frame in the animation.
-pub fn extract_frames(sheet: &DynamicImage, anim_info: &AnimInfo, dir_row: u32) -> Vec<DynamicImage> {
+pub fn extract_frames(
+    sheet: &DynamicImage,
+    anim_info: &AnimInfo,
+    dir_row: u32,
+) -> Vec<DynamicImage> {
     let frame_count = anim_info.frame_count();
     let fw = anim_info.frame_width;
     let fh = anim_info.frame_height;
@@ -110,9 +114,9 @@ mod tests {
 
         // Color row 0 frames distinctly
         let colors = [
-            Rgba([255, 0, 0, 255]),   // Frame 0: red
-            Rgba([0, 255, 0, 255]),   // Frame 1: green
-            Rgba([0, 0, 255, 255]),   // Frame 2: blue
+            Rgba([255, 0, 0, 255]), // Frame 0: red
+            Rgba([0, 255, 0, 255]), // Frame 1: green
+            Rgba([0, 0, 255, 255]), // Frame 2: blue
         ];
 
         for col in 0..cols {

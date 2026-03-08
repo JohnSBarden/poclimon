@@ -49,7 +49,9 @@ pub fn render_splash(f: &mut Frame<'_>) {
                         ),
                         (false, true) => Span::styled(
                             "▄",
-                            Style::default().fg(Color::Rgb(br, bg_r, bb)).bg(Color::Reset),
+                            Style::default()
+                                .fg(Color::Rgb(br, bg_r, bb))
+                                .bg(Color::Reset),
                         ),
                         (false, false) => Span::raw(" "),
                     }
@@ -90,7 +92,11 @@ pub fn render_splash(f: &mut Frame<'_>) {
 
     f.render_widget(
         Paragraph::new("@JohnSBarden")
-            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+            .style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
             .alignment(Alignment::Center),
         chunks[5],
     );
@@ -234,10 +240,11 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
     f.render_widget(status, chunks[2]);
 
     // Help bar
-    let help =
-        Paragraph::new("[E]at [S]leep [I]dle [P]lay [←/→] [1-6] [A]dd # [Tab]Swap # [R]emove [Q]uit")
-            .style(Style::default().fg(Color::DarkGray))
-            .block(Block::default().borders(Borders::ALL));
+    let help = Paragraph::new(
+        "[E]at [S]leep [I]dle [P]lay [←/→] [1-6] [A]dd # [Tab]Swap # [R]emove [Q]uit",
+    )
+    .style(Style::default().fg(Color::DarkGray))
+    .block(Block::default().borders(Borders::ALL));
     f.render_widget(help, chunks[3]);
 
     // Prompt overlay — appears centered over the pen area when Add or Swap is active.
@@ -603,11 +610,11 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
 
         let (toy_x, toy_y) = match slot.current_dir {
             // Down  — just below, horizontally centred on the sprite
-            Direction::Down  => (rx + sw / 2 - tw / 2, ry + sh),
+            Direction::Down => (rx + sw / 2 - tw / 2, ry + sh),
             // Left  — face on right side of the Left sprite → toy to the right
-            Direction::Left  => (rx + sw, ry + sh / 2 - th / 2),
+            Direction::Left => (rx + sw, ry + sh / 2 - th / 2),
             // Up    — just above, horizontally centred on the sprite
-            Direction::Up    => (rx + sw / 2 - tw / 2, ry - th),
+            Direction::Up => (rx + sw / 2 - tw / 2, ry - th),
             // Right — face on left side of the Right sprite → toy to the left
             Direction::Right => (rx - tw, ry + sh / 2 - th / 2),
         };

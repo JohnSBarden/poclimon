@@ -26,8 +26,8 @@ impl AnimationState {
     /// not represented here and callers must use the literal `3` for it.
     pub fn encoded_index(self) -> usize {
         match self {
-            AnimationState::Idle    => 0,
-            AnimationState::Eating  => 1,
+            AnimationState::Idle => 0,
+            AnimationState::Eating => 1,
             AnimationState::Sleeping => 2,
             AnimationState::Playing => 4,
         }
@@ -122,12 +122,7 @@ impl Animator {
     /// The `Animation` values here are timing-only; the corresponding
     /// pixel frames must be stored in `CreatureSlot::cached_*`.
     /// Call `set_hop_animation` afterwards to wire up the Playing state.
-    pub fn load_animations(
-        &mut self,
-        idle: Animation,
-        eat: Animation,
-        sleep: Animation,
-    ) {
+    pub fn load_animations(&mut self, idle: Animation, eat: Animation, sleep: Animation) {
         self.idle_anim = Some(idle);
         self.eat_anim = Some(eat);
         self.sleep_anim = Some(sleep);
@@ -223,12 +218,12 @@ mod tests {
     fn test_animation_looping_frame_index() {
         let anim = make_test_animation();
         // 100 ms per frame, 300 ms total
-        assert_eq!(anim.frame_index_at(0), 0);    // start of frame 0
-        assert_eq!(anim.frame_index_at(50), 0);   // middle of frame 0
-        assert_eq!(anim.frame_index_at(100), 1);  // start of frame 1
-        assert_eq!(anim.frame_index_at(200), 2);  // start of frame 2
-        assert_eq!(anim.frame_index_at(300), 0);  // loops back
-        assert_eq!(anim.frame_index_at(400), 1);  // looped frame 1
+        assert_eq!(anim.frame_index_at(0), 0); // start of frame 0
+        assert_eq!(anim.frame_index_at(50), 0); // middle of frame 0
+        assert_eq!(anim.frame_index_at(100), 1); // start of frame 1
+        assert_eq!(anim.frame_index_at(200), 2); // start of frame 2
+        assert_eq!(anim.frame_index_at(300), 0); // loops back
+        assert_eq!(anim.frame_index_at(400), 1); // looped frame 1
     }
 
     #[test]

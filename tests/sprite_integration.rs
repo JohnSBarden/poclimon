@@ -8,7 +8,8 @@ use poclimon::sprite_sheet;
 #[ignore = "requires network access and curl"]
 fn test_pikachu_sprite_download_and_frame_extraction() {
     // Download AnimData.xml for Pikachu (ID 25)
-    let url = "https://raw.githubusercontent.com/PMDCollab/SpriteCollab/master/sprite/0025/AnimData.xml";
+    let url =
+        "https://raw.githubusercontent.com/PMDCollab/SpriteCollab/master/sprite/0025/AnimData.xml";
     let output = std::process::Command::new("curl")
         .args(["-sL", url])
         .output()

@@ -553,11 +553,7 @@ pub fn encode_toy_image(
             .map(Protocol::Halfblocks)
     } else {
         picker
-            .new_protocol(
-                img.clone(),
-                area,
-                Resize::Scale(Some(FilterType::Lanczos3)),
-            )
+            .new_protocol(img.clone(), area, Resize::Scale(Some(FilterType::Lanczos3)))
             .ok()
     }
 }
