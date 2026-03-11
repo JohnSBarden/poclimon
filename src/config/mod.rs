@@ -1,3 +1,4 @@
+use crate::creature::CreatureSlot;
 use crate::creatures;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -21,6 +22,18 @@ pub enum ConfigError {
     Validation(String),
 }
 
+/// A single slot entry in the new `[[slot]]` TOML format.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SlotEntry {
+    pub id: u32,
+    pub slot_id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub level: u32,
+    #[serde(default)]
+    pub xp: u32,
+}
+
 /// Raw TOML config structure.
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct TomlConfig {
@@ -28,6 +41,10 @@ pub struct TomlConfig {
     pub display: DisplayConfig,
     #[serde(default)]
     pub roster: RosterConfig,
+    /// New-format slot entries. When non-empty, these take precedence over
+    /// `roster.creatures`.
+    #[serde(default)]
+    pub slot: Vec<SlotEntry>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -70,12 +87,22 @@ fn default_creatures() -> Vec<String> {
     ]
 }
 
+/// A slot in the resolved game roster, carrying persistence fields.
+#[derive(Debug, Clone)]
+pub struct RosterSlot {
+    pub creature_id: u32,
+    pub name: String,
+    pub slot_id: u64,
+    pub level: u32,
+    pub xp: u32,
+}
+
 /// Resolved game config with validated creature IDs.
 #[derive(Debug, Clone)]
 pub struct GameConfig {
     pub scale: u32,
-    /// List of (creature_id, creature_name) for the active roster.
-    pub roster: Vec<(u32, String)>,
+    /// Active roster entries.
+    pub roster: Vec<RosterSlot>,
 }
 
 impl Default for GameConfig {
@@ -83,11 +110,41 @@ impl Default for GameConfig {
         Self {
             scale: 3,
             roster: vec![
-                (1, "Bulbasaur".to_string()),
-                (4, "Charmander".to_string()),
-                (7, "Squirtle".to_string()),
-                (25, "Pikachu".to_string()),
-                (133, "Eevee".to_string()),
+                RosterSlot {
+                    creature_id: 1,
+                    name: "Bulbasaur".to_string(),
+                    slot_id: rand::random::<u64>(),
+                    level: 1,
+                    xp: 0,
+                },
+                RosterSlot {
+                    creature_id: 4,
+                    name: "Charmander".to_string(),
+                    slot_id: rand::random::<u64>(),
+                    level: 1,
+                    xp: 0,
+                },
+                RosterSlot {
+                    creature_id: 7,
+                    name: "Squirtle".to_string(),
+                    slot_id: rand::random::<u64>(),
+                    level: 1,
+                    xp: 0,
+                },
+                RosterSlot {
+                    creature_id: 25,
+                    name: "Pikachu".to_string(),
+                    slot_id: rand::random::<u64>(),
+                    level: 1,
+                    xp: 0,
+                },
+                RosterSlot {
+                    creature_id: 133,
+                    name: "Eevee".to_string(),
+                    slot_id: rand::random::<u64>(),
+                    level: 1,
+                    xp: 0,
+                },
             ],
         }
     }
@@ -125,12 +182,61 @@ impl GameConfig {
             .ok_or_else(|| ConfigError::Validation(format!("Unknown creature: '{name}'")))?;
         Ok(Self {
             scale: 3,
-            roster: vec![(creature.id, creature.name.to_string())],
+            roster: vec![RosterSlot {
+                creature_id: creature.id,
+                name: creature.name.to_string(),
+                slot_id: rand::random::<u64>(),
+                level: 1,
+                xp: 0,
+            }],
         })
     }
 
     /// Convert a parsed TOML config into a validated GameConfig.
     pub fn from_toml(toml: TomlConfig) -> Result<Self, ConfigError> {
+        // New format: use `[[slot]]` entries if present.
+        if !toml.slot.is_empty() {
+            let slots = &toml.slot;
+
+            if slots.len() > MAX_ACTIVE_CREATURES {
+                return Err(ConfigError::Validation(format!(
+                    "Maximum {MAX_ACTIVE_CREATURES} creatures allowed in roster"
+                )));
+            }
+
+            let mut roster = Vec::new();
+            for entry in slots {
+                // Validate the ID exists.
+                let creature = creatures::find_by_id(entry.id).ok_or_else(|| {
+                    ConfigError::Validation(format!("Unknown creature ID: {}", entry.id))
+                })?;
+
+                // slot_id == 0 means the old format generated it; give it a fresh random ID.
+                let slot_id = if entry.slot_id == 0 {
+                    rand::random::<u64>()
+                } else {
+                    entry.slot_id
+                };
+
+                // level defaults to 1 when missing/zero.
+                let level = if entry.level == 0 { 1 } else { entry.level };
+
+                roster.push(RosterSlot {
+                    creature_id: creature.id,
+                    name: creature.name.to_string(),
+                    slot_id,
+                    level,
+                    xp: entry.xp,
+                });
+            }
+
+            return Ok(Self {
+                scale: toml.display.scale,
+                roster,
+            });
+        }
+
+        // Old format: fall back to `roster.creatures`.
         let creatures = &toml.roster.creatures;
 
         if creatures.len() > MAX_ACTIVE_CREATURES {
@@ -150,7 +256,13 @@ impl GameConfig {
             // Try as numeric ID first
             if let Ok(id) = entry.parse::<u32>() {
                 if let Some(c) = creatures::find_by_id(id) {
-                    roster.push((c.id, c.name.to_string()));
+                    roster.push(RosterSlot {
+                        creature_id: c.id,
+                        name: c.name.to_string(),
+                        slot_id: rand::random::<u64>(),
+                        level: 1,
+                        xp: 0,
+                    });
                     continue;
                 }
                 return Err(ConfigError::Validation(format!(
@@ -159,7 +271,13 @@ impl GameConfig {
             }
             // Try as name
             if let Some(c) = creatures::find_by_name(entry) {
-                roster.push((c.id, c.name.to_string()));
+                roster.push(RosterSlot {
+                    creature_id: c.id,
+                    name: c.name.to_string(),
+                    slot_id: rand::random::<u64>(),
+                    level: 1,
+                    xp: 0,
+                });
             } else {
                 return Err(ConfigError::Validation(format!(
                     "Unknown creature: '{entry}'"
@@ -171,6 +289,45 @@ impl GameConfig {
             scale: toml.display.scale,
             roster,
         })
+    }
+
+    /// Save the current roster state back to the TOML file.
+    ///
+    /// Writes the new `[[slot]]` format, preserving `[display]` settings.
+    /// Silently succeeds if there are no slots.
+    pub fn save(path: &Path, scale: u32, slots: &[&CreatureSlot]) -> Result<(), ConfigError> {
+        let slot_entries: Vec<SlotEntry> = slots
+            .iter()
+            .map(|s| SlotEntry {
+                id: s.creature_id,
+                slot_id: s.slot_id,
+                name: s.creature_name.clone(),
+                level: s.level,
+                xp: s.xp,
+            })
+            .collect();
+
+        // Build a minimal TOML document manually so we get the right structure.
+        // We only write [display] and [[slot]] — no legacy [roster] section.
+        let mut out = String::new();
+        out.push_str("[display]\n");
+        out.push_str(&format!("scale = {}\n", scale));
+
+        for entry in &slot_entries {
+            out.push('\n');
+            out.push_str("[[slot]]\n");
+            out.push_str(&format!("id = {}\n", entry.id));
+            out.push_str(&format!("slot_id = {}\n", entry.slot_id));
+            out.push_str(&format!("name = \"{}\"\n", entry.name));
+            out.push_str(&format!("level = {}\n", entry.level));
+            out.push_str(&format!("xp = {}\n", entry.xp));
+        }
+
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, out)?;
+        Ok(())
     }
 }
 
@@ -191,9 +348,12 @@ mod tests {
         let config = GameConfig::default();
         assert_eq!(config.scale, 3);
         assert_eq!(config.roster.len(), 5);
-        assert_eq!(config.roster[0], (1, "Bulbasaur".to_string()));
-        assert_eq!(config.roster[3], (25, "Pikachu".to_string()));
-        assert_eq!(config.roster[4], (133, "Eevee".to_string()));
+        assert_eq!(config.roster[0].creature_id, 1);
+        assert_eq!(config.roster[0].name, "Bulbasaur");
+        assert_eq!(config.roster[3].creature_id, 25);
+        assert_eq!(config.roster[3].name, "Pikachu");
+        assert_eq!(config.roster[4].creature_id, 133);
+        assert_eq!(config.roster[4].name, "Eevee");
     }
 
     #[test]
@@ -209,8 +369,10 @@ creatures = ["pikachu", "eevee"]
         let config = GameConfig::from_toml(toml_config).unwrap();
         assert_eq!(config.scale, 8);
         assert_eq!(config.roster.len(), 2);
-        assert_eq!(config.roster[0], (25, "Pikachu".to_string()));
-        assert_eq!(config.roster[1], (133, "Eevee".to_string()));
+        assert_eq!(config.roster[0].creature_id, 25);
+        assert_eq!(config.roster[0].name, "Pikachu");
+        assert_eq!(config.roster[1].creature_id, 133);
+        assert_eq!(config.roster[1].name, "Eevee");
     }
 
     #[test]
@@ -221,8 +383,10 @@ creatures = ["25", "1"]
 "#;
         let toml_config: TomlConfig = toml::from_str(toml_str).unwrap();
         let config = GameConfig::from_toml(toml_config).unwrap();
-        assert_eq!(config.roster[0], (25, "Pikachu".to_string()));
-        assert_eq!(config.roster[1], (1, "Bulbasaur".to_string()));
+        assert_eq!(config.roster[0].creature_id, 25);
+        assert_eq!(config.roster[0].name, "Pikachu");
+        assert_eq!(config.roster[1].creature_id, 1);
+        assert_eq!(config.roster[1].name, "Bulbasaur");
     }
 
     #[test]
@@ -268,16 +432,17 @@ creatures = ["mewtwo"]
         let config = GameConfig::from_toml(toml_config).unwrap();
         assert_eq!(config.scale, 3);
         assert_eq!(config.roster.len(), 3);
-        assert_eq!(config.roster[0].1, "Bulbasaur");
-        assert_eq!(config.roster[1].1, "Charmander");
-        assert_eq!(config.roster[2].1, "Squirtle");
+        assert_eq!(config.roster[0].name, "Bulbasaur");
+        assert_eq!(config.roster[1].name, "Charmander");
+        assert_eq!(config.roster[2].name, "Squirtle");
     }
 
     #[test]
     fn test_from_creature_name() {
         let config = GameConfig::from_creature_name("eevee").unwrap();
         assert_eq!(config.roster.len(), 1);
-        assert_eq!(config.roster[0], (133, "Eevee".to_string()));
+        assert_eq!(config.roster[0].creature_id, 133);
+        assert_eq!(config.roster[0].name, "Eevee");
     }
 
     #[test]
@@ -316,7 +481,105 @@ creatures = ["134", "135", "136", "144", "145", "146"]
         let toml_config: TomlConfig = toml::from_str(toml_str).unwrap();
         let config = GameConfig::from_toml(toml_config).unwrap();
         assert_eq!(config.roster.len(), 6);
-        assert_eq!(config.roster[0].1, "Vaporeon");
-        assert_eq!(config.roster[5].1, "Moltres");
+        assert_eq!(config.roster[0].name, "Vaporeon");
+        assert_eq!(config.roster[5].name, "Moltres");
+    }
+
+    // ── New format tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_new_format_loads_level_xp() {
+        let toml_str = r#"
+[display]
+scale = 3
+
+[[slot]]
+id = 25
+slot_id = 8675309
+name = "Pikachu"
+level = 3
+xp = 42
+
+[[slot]]
+id = 1
+slot_id = 1234567
+name = "Bulbasaur"
+level = 1
+xp = 0
+"#;
+        let toml_config: TomlConfig = toml::from_str(toml_str).unwrap();
+        let config = GameConfig::from_toml(toml_config).unwrap();
+        assert_eq!(config.roster.len(), 2);
+        assert_eq!(config.roster[0].creature_id, 25);
+        assert_eq!(config.roster[0].name, "Pikachu");
+        assert_eq!(config.roster[0].slot_id, 8675309);
+        assert_eq!(config.roster[0].level, 3);
+        assert_eq!(config.roster[0].xp, 42);
+        assert_eq!(config.roster[1].creature_id, 1);
+        assert_eq!(config.roster[1].slot_id, 1234567);
+        assert_eq!(config.roster[1].level, 1);
+        assert_eq!(config.roster[1].xp, 0);
+    }
+
+    #[test]
+    fn test_old_format_still_loads() {
+        let toml_str = r#"
+[roster]
+creatures = ["pikachu", "eevee"]
+"#;
+        let toml_config: TomlConfig = toml::from_str(toml_str).unwrap();
+        let config = GameConfig::from_toml(toml_config).unwrap();
+        assert_eq!(config.roster.len(), 2);
+        assert_eq!(config.roster[0].name, "Pikachu");
+        assert_eq!(config.roster[1].name, "Eevee");
+        // Old format gets level 1 and xp 0.
+        assert_eq!(config.roster[0].level, 1);
+        assert_eq!(config.roster[0].xp, 0);
+    }
+
+    #[test]
+    fn test_old_format_slot_id_nonzero() {
+        let toml_str = r#"
+[roster]
+creatures = ["pikachu"]
+"#;
+        let toml_config: TomlConfig = toml::from_str(toml_str).unwrap();
+        let config = GameConfig::from_toml(toml_config).unwrap();
+        assert_ne!(config.roster[0].slot_id, 0);
+    }
+
+    #[test]
+    fn test_slot_entry_toml_roundtrip() {
+        let entry = SlotEntry {
+            id: 25,
+            slot_id: 9999,
+            name: "Pikachu".to_string(),
+            level: 5,
+            xp: 100,
+        };
+        // Serialize to TOML and back.
+        let serialized = toml::to_string(&entry).unwrap();
+        let deserialized: SlotEntry = toml::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.id, 25);
+        assert_eq!(deserialized.slot_id, 9999);
+        assert_eq!(deserialized.name, "Pikachu");
+        assert_eq!(deserialized.level, 5);
+        assert_eq!(deserialized.xp, 100);
+    }
+
+    #[test]
+    fn test_new_format_slot_id_zero_regenerated() {
+        // slot_id = 0 in the file should be treated as "missing" and regenerated.
+        let toml_str = r#"
+[[slot]]
+id = 25
+slot_id = 0
+name = "Pikachu"
+level = 1
+xp = 0
+"#;
+        let toml_config: TomlConfig = toml::from_str(toml_str).unwrap();
+        let config = GameConfig::from_toml(toml_config).unwrap();
+        assert_ne!(config.roster[0].slot_id, 0);
     }
 }
