@@ -385,7 +385,8 @@ pub fn sprite_stack_h(sprite_h: u16) -> u16 {
 }
 
 /// Map velocity to a cardinal direction.
-/// Returns: Down, Left, Up, or Right.
+///
+/// Terminal Y increases downward, so positive vel_y = moving down the screen.
 pub fn velocity_to_dir(vel_x: f32, vel_y: f32) -> Direction {
     if vel_x.abs() < 0.01 && vel_y.abs() < 0.01 {
         return Direction::Down; // stationary → face down
@@ -397,9 +398,9 @@ pub fn velocity_to_dir(vel_x: f32, vel_y: f32) -> Direction {
             Direction::Left
         }
     } else if vel_y > 0.0 {
-        Direction::Up
+        Direction::Down // moving toward bottom of screen
     } else {
-        Direction::Down
+        Direction::Up
     }
 }
 
@@ -418,9 +419,9 @@ pub fn stable_velocity_to_dir(vel_x: f32, vel_y: f32, current_dir: Direction) ->
             Direction::Left
         }
     } else if vel_y > 0.0 {
-        Direction::Up
+        Direction::Down // terminal Y increases downward
     } else {
-        Direction::Down
+        Direction::Up
     };
     // Only change if crossing diagonal threshold
     if new_dir != current_dir {
