@@ -372,7 +372,19 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
         let state = slot.animator.state();
         let mut frame_idx = slot.animator.current_frame_index().unwrap_or(0);
         let mut state_idx = state.encoded_index();
-        let dir_idx = slot.current_dir.as_index();
+        // Playing: snap to Left/Right only — hop sprites don't have meaningful
+        // Up/Down frames and it looks odd when the creature briefly faces away.
+        // Use the current horizontal velocity to pick the side, so it stays
+        // consistent with where the creature will hop next.
+        let dir_idx = if state == AnimationState::Playing {
+            if slot.vel_x >= 0.0 {
+                Direction::Right.as_index()
+            } else {
+                Direction::Left.as_index()
+            }
+        } else {
+            slot.current_dir.as_index()
+        };
 
         let render_x = (pen_inner.x + slot.pos_x.round() as u16)
             .min(pen_inner.x + pen_inner.width.saturating_sub(sprite_w));
@@ -608,15 +620,17 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
         let tw = TOY_W as i32;
         let th = toy_h as i32;
 
-        let (toy_x, toy_y) = match slot.current_dir {
-            // Down  — just below, horizontally centred on the sprite
-            Direction::Down => (rx + sw / 2 - tw / 2, ry + sh),
-            // Left  — face on right side of the Left sprite → toy to the right
-            Direction::Left => (rx + sw, ry + sh / 2 - th / 2),
-            // Up    — just above, horizontally centred on the sprite
-            Direction::Up => (rx + sw / 2 - tw / 2, ry - th),
-            // Right — face on left side of the Right sprite → toy to the left
-            Direction::Right => (rx - tw, ry + sh / 2 - th / 2),
+        // Mirror the dir_idx snap above: Playing is always Left or Right.
+        // Pull the toy 4 cells into the sprite allocation to close any gap
+        // from transparent padding around the PMDCollab sprite art.
+        const INSET: i32 = 4;
+        let toy_mid_y = ry + sh / 2 - th / 2;
+        let (toy_x, toy_y) = if slot.vel_x >= 0.0 {
+            // Facing right → toy in front, to the right
+            (rx + sw - INSET, toy_mid_y)
+        } else {
+            // Facing left → toy in front, to the left
+            (rx - tw + INSET, toy_mid_y)
         };
 
         let px = pen_inner.x as i32;
