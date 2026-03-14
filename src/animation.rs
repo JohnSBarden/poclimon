@@ -104,6 +104,12 @@ pub struct Animator {
     hop_anim: Option<Animation>,
 }
 
+impl Default for Animator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Animator {
     /// Create a new Animator. Call `load_animations` to set up timing data.
     pub fn new() -> Self {
