@@ -63,6 +63,12 @@ pub struct SpriteCache {
     pub encoded_rect: Option<ratatui::layout::Rect>,
 }
 
+impl Default for SpriteCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SpriteCache {
     pub fn new() -> Self {
         Self {
@@ -82,6 +88,9 @@ impl SpriteCache {
 /// Pixel data lives here; the animator only knows timing/state.
 pub struct CreatureSlot {
     pub creature_id: u32,
+    /// Unique identifier for this slot instance. Generated randomly on creation
+    /// so two slots with the same Pokédex ID can still be distinguished.
+    pub slot_id: u64,
     pub creature_name: String,
     pub animator: Animator,
     /// All sprite frames and terminal-encoded protocols for this slot.
@@ -135,6 +144,7 @@ impl CreatureSlot {
     pub fn new(creature_id: u32, creature_name: String) -> Self {
         Self {
             creature_id,
+            slot_id: rand::random::<u64>(),
             creature_name,
             animator: Animator::new(),
             sprites: SpriteCache::new(),

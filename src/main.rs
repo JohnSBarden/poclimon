@@ -23,23 +23,28 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend};
 use ratatui_image::picker::Picker;
 use std::io;
+use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Cli::parse();
 
-    let config = if let Some(name) = &args.creature {
-        // Quick override — single creature
-        match GameConfig::from_creature_name(name) {
+    let (config, save_path): (GameConfig, Option<PathBuf>) = if let Some(name) = &args.creature {
+        // Quick override — single creature, no persistence.
+        let cfg = match GameConfig::from_creature_name(name) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("Warning: {e} — using default");
                 GameConfig::default()
             }
-        }
+        };
+        (cfg, None)
     } else if let Some(path) = args.config {
-        GameConfig::load(path)?
+        let cfg = GameConfig::load(&path)?;
+        (cfg, Some(path))
     } else {
-        GameConfig::load_default().unwrap_or_default()
+        let path = config::default_config_path();
+        let cfg = GameConfig::load_default().unwrap_or_default();
+        (cfg, Some(path))
     };
 
     enable_raw_mode()?;
@@ -50,7 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::from_fontsize((8, 16)));
 
-    let mut app = App::new(config);
+    let mut app = App::new(config, save_path);
 
     app.start_background_loads();
 

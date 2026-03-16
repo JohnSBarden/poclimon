@@ -3,6 +3,7 @@ use crate::creature::CreatureSlot;
 use crate::notification::{MAX_NOTIFICATIONS, NotifLevel, Notification};
 use crate::sprite_loading::{AddTransition, SwapTransition, SwapWorkerResult};
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::mpsc::{self};
 use std::time::{Duration, Instant};
 
@@ -47,14 +48,24 @@ pub struct App {
     /// Set by `render_pen` each frame; used by `update_physics` on the next tick.
     /// `None` until the first render completes.
     pub pen_dims: Option<(u16, u16, u16)>,
+    /// Path to save the roster state to (if persistence is enabled).
+    pub save_path: Option<PathBuf>,
+    /// Timestamp of the last periodic save (for throttling).
+    last_save: Instant,
 }
 
 impl App {
-    pub fn new(config: GameConfig) -> Self {
+    pub fn new(config: GameConfig, save_path: Option<PathBuf>) -> Self {
         let slots: Vec<CreatureSlot> = config
             .roster
             .iter()
-            .map(|(id, name)| CreatureSlot::new(*id, name.clone()))
+            .map(|r| {
+                let mut slot = CreatureSlot::new(r.creature_id, r.name.clone());
+                slot.slot_id = r.slot_id;
+                slot.level = r.level;
+                slot.xp = r.xp;
+                slot
+            })
             .collect();
 
         const TOY_PNG: &[u8] = include_bytes!("../assets/poke_doll.png");
@@ -76,6 +87,22 @@ impl App {
             prompt_mode: PromptMode::None,
             prompt_buffer: String::new(),
             pen_dims: None,
+            save_path,
+            last_save: Instant::now(),
+        }
+    }
+
+    /// Persist the current roster state back to the config file.
+    ///
+    /// Silently does nothing if no save path is set. Save errors are
+    /// non-fatal — the next save attempt will retry.
+    fn save_roster(&self) {
+        let Some(path) = &self.save_path else {
+            return;
+        };
+        let slot_refs: Vec<&CreatureSlot> = self.slots.iter().collect();
+        if let Err(e) = GameConfig::save(path, self.config.scale, &slot_refs) {
+            let _ = e; // Can't notify from &self — ignore silently.
         }
     }
 
@@ -188,6 +215,10 @@ impl App {
                     slot.dir_cooldown_ticks = existing.dir_cooldown_ticks;
                     // Preserve initialized flag so render_pen doesn't re-randomize position.
                     slot.position_initialized = existing.position_initialized;
+                    // Preserve persisted XP and level.
+                    slot.level = existing.level;
+                    slot.xp = existing.xp;
+                    slot.slot_id = existing.slot_id;
                     self.slots[slot_index] = *slot;
                     for w in warnings {
                         self.notify(NotifLevel::Warn, w);
@@ -212,6 +243,12 @@ impl App {
         self.update_swap_transition();
         self.update_add_transition();
         self.expire_notifications(Duration::from_secs(crate::notification::NOTIF_TTL_SECS));
+
+        // Periodic save every 30 seconds.
+        if self.last_save.elapsed() > Duration::from_secs(30) {
+            self.save_roster();
+            self.last_save = Instant::now();
+        }
     }
 
     /// Advance physics for all slots using the pen dimensions from the last render.
@@ -261,11 +298,15 @@ impl App {
             }
         }
 
+        let leveled_up = !level_up_events.is_empty();
         for (name, level) in level_up_events {
             self.notify(
                 NotifLevel::Info,
                 format!("{name} leveled up! Now level {level} ✨"),
             );
+        }
+        if leveled_up {
+            self.save_roster();
         }
     }
 
@@ -334,6 +375,7 @@ impl App {
         if self.selected >= self.slots.len() {
             self.selected = self.slots.len() - 1;
         }
+        self.save_roster();
     }
 
     /// Poll and advance an in-progress swap transition.
@@ -376,6 +418,7 @@ impl App {
                 self.slots[slot_index] = slot;
             }
             self.swap_transition = None;
+            self.save_roster();
             for warning in post_warnings {
                 self.notify(NotifLevel::Warn, warning);
             }
@@ -418,6 +461,7 @@ impl App {
             self.add_transition = None;
             if self.slots.len() < MAX_ACTIVE_CREATURES {
                 self.slots.push(slot);
+                self.save_roster();
             } else {
                 self.notify(
                     NotifLevel::Warn,
