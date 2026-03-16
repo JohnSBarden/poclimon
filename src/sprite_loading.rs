@@ -8,7 +8,7 @@ use image::imageops::FilterType;
 use ratatui_image::{Resize, picker::Picker, protocol::Protocol};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::mpsc::Receiver;
+use std::sync::{Arc, mpsc::Receiver};
 
 use crate::creature::MAX_CACHED_FRAMES;
 
@@ -72,143 +72,129 @@ pub fn cap_frames(
 /// Creatures missing an Eat or Sleep animation (e.g. Articuno, Zapdos, Moltres,
 /// Vaporeon) silently fall back to their Idle frames — no yellow "?" placeholder,
 /// no size change on state switch, no warning noise.
+/// Wrap a `Vec<DynamicImage>` in `Arc` so multiple animations can share the
+/// same pixel data without copying (important for fallback animations that
+/// reuse Idle frames for Eat/Sleep/Hop).
+fn to_arc_frames(frames: Vec<image::DynamicImage>) -> Vec<Arc<image::DynamicImage>> {
+    frames.into_iter().map(Arc::new).collect()
+}
+
 pub fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<String>> {
     let (anim_data_path, sheets, warnings) = sprite::download_all_sprites(slot.creature_id)?;
 
     let xml = std::fs::read_to_string(&anim_data_path)?;
     let anim_infos = crate::anim_data::parse_anim_data(&xml);
 
-    // PMDCollab direction row indices: 0=Down, 2=Left, 4=Up, 6=Right
-    // Our dir_idx mapping:             0=Down, 1=Left, 2=Up, 3=Right
-    const DIR_ROWS: [u32; 4] = [0, 2, 4, 6];
+    // PMDCollab direction row indices: 0=Down, 2=Right, 4=Up, 6=Left
+    // Our dir_idx mapping:             0=Down, 1=Left,  2=Up, 3=Right
+    const DIR_ROWS: [u32; 4] = [0, 6, 4, 2];
+
+    // Pre-decode each unique sprite sheet once.  Every animation uses 4 direction
+    // calls against the same PNG, so decoding here saves 3× repeated file I/O.
+    let decoded_sheets: HashMap<String, image::DynamicImage> = sheets
+        .iter()
+        .filter_map(|(name, path)| {
+            image::ImageReader::open(path)
+                .ok()?
+                .decode()
+                .ok()
+                .map(|img| (name.clone(), img))
+        })
+        .collect();
 
     // Load Idle for all 4 directions — use dir 0 (Down) to establish canonical size.
+    let idle_pre = decoded_sheets.get("Idle");
     let (idle_down, idle_timing, idle_w, idle_h, _) =
-        load_and_scale_animation("Idle", &sheets, &anim_infos, scale, None, DIR_ROWS[0])?;
+        load_and_scale_animation("Idle", &sheets, idle_pre, &anim_infos, scale, None, DIR_ROWS[0])?;
     let idle_left = load_and_scale_animation(
-        "Idle",
-        &sheets,
-        &anim_infos,
-        scale,
-        Some((idle_w, idle_h)),
-        DIR_ROWS[1],
+        "Idle", &sheets, idle_pre, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[1],
     )
     .map(|r| r.0)
     .unwrap_or_else(|_| idle_down.clone());
     let idle_up = load_and_scale_animation(
-        "Idle",
-        &sheets,
-        &anim_infos,
-        scale,
-        Some((idle_w, idle_h)),
-        DIR_ROWS[2],
+        "Idle", &sheets, idle_pre, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[2],
     )
     .map(|r| r.0)
     .unwrap_or_else(|_| idle_down.clone());
     let idle_right = load_and_scale_animation(
-        "Idle",
-        &sheets,
-        &anim_infos,
-        scale,
-        Some((idle_w, idle_h)),
-        DIR_ROWS[3],
+        "Idle", &sheets, idle_pre, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[3],
     )
     .map(|r| r.0)
     .unwrap_or_else(|_| idle_down.clone());
-    slot.sprites.idle = [idle_down.clone(), idle_left, idle_up, idle_right];
+    slot.sprites.idle = [
+        to_arc_frames(idle_down.clone()),
+        to_arc_frames(idle_left),
+        to_arc_frames(idle_up),
+        to_arc_frames(idle_right),
+    ];
 
     // Try Eat dir 0 first to get fallback status.
+    let eat_pre = decoded_sheets.get("Eat");
     let (eat_down_raw, eat_timing_raw, _, _, eat_fallback) = load_and_scale_animation(
-        "Eat",
-        &sheets,
-        &anim_infos,
-        scale,
-        Some((idle_w, idle_h)),
-        DIR_ROWS[0],
+        "Eat", &sheets, eat_pre, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[0],
     )?;
     let (eat_frames_by_dir, eat_timing) = if eat_fallback {
         // Reuse Idle frames for all 4 directions
         (slot.sprites.idle.clone(), idle_timing.clone())
     } else {
         let eat_left = load_and_scale_animation(
-            "Eat",
-            &sheets,
-            &anim_infos,
-            scale,
-            Some((idle_w, idle_h)),
-            DIR_ROWS[1],
+            "Eat", &sheets, eat_pre, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[1],
         )
         .map(|r| r.0)
         .unwrap_or_else(|_| eat_down_raw.clone());
         let eat_up = load_and_scale_animation(
-            "Eat",
-            &sheets,
-            &anim_infos,
-            scale,
-            Some((idle_w, idle_h)),
-            DIR_ROWS[2],
+            "Eat", &sheets, eat_pre, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[2],
         )
         .map(|r| r.0)
         .unwrap_or_else(|_| eat_down_raw.clone());
         let eat_right = load_and_scale_animation(
-            "Eat",
-            &sheets,
-            &anim_infos,
-            scale,
-            Some((idle_w, idle_h)),
-            DIR_ROWS[3],
+            "Eat", &sheets, eat_pre, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[3],
         )
         .map(|r| r.0)
         .unwrap_or_else(|_| eat_down_raw.clone());
-        ([eat_down_raw, eat_left, eat_up, eat_right], eat_timing_raw)
+        (
+            [
+                to_arc_frames(eat_down_raw),
+                to_arc_frames(eat_left),
+                to_arc_frames(eat_up),
+                to_arc_frames(eat_right),
+            ],
+            eat_timing_raw,
+        )
     };
     slot.sprites.eat = eat_frames_by_dir;
 
     // Try Sleep dir 0 first to get fallback status.
+    let sleep_pre = decoded_sheets.get("Sleep");
     let (sleep_down_raw, sleep_timing_raw, _, _, sleep_fallback) = load_and_scale_animation(
-        "Sleep",
-        &sheets,
-        &anim_infos,
-        scale,
-        Some((idle_w, idle_h)),
-        DIR_ROWS[0],
+        "Sleep", &sheets, sleep_pre, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[0],
     )?;
     let (sleep_frames_by_dir, sleep_timing) = if sleep_fallback {
         // Reuse Idle frames for all 4 directions
         (slot.sprites.idle.clone(), idle_timing.clone())
     } else {
         let sleep_left = load_and_scale_animation(
-            "Sleep",
-            &sheets,
-            &anim_infos,
-            scale,
-            Some((idle_w, idle_h)),
-            DIR_ROWS[1],
+            "Sleep", &sheets, sleep_pre, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[1],
         )
         .map(|r| r.0)
         .unwrap_or_else(|_| sleep_down_raw.clone());
         let sleep_up = load_and_scale_animation(
-            "Sleep",
-            &sheets,
-            &anim_infos,
-            scale,
-            Some((idle_w, idle_h)),
-            DIR_ROWS[2],
+            "Sleep", &sheets, sleep_pre, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[2],
         )
         .map(|r| r.0)
         .unwrap_or_else(|_| sleep_down_raw.clone());
         let sleep_right = load_and_scale_animation(
-            "Sleep",
-            &sheets,
-            &anim_infos,
-            scale,
-            Some((idle_w, idle_h)),
-            DIR_ROWS[3],
+            "Sleep", &sheets, sleep_pre, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[3],
         )
         .map(|r| r.0)
         .unwrap_or_else(|_| sleep_down_raw.clone());
         (
-            [sleep_down_raw, sleep_left, sleep_up, sleep_right],
+            [
+                to_arc_frames(sleep_down_raw),
+                to_arc_frames(sleep_left),
+                to_arc_frames(sleep_up),
+                to_arc_frames(sleep_right),
+            ],
             sleep_timing_raw,
         )
     };
@@ -217,89 +203,64 @@ pub fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<Stri
     // Recall animation for swap transitions:
     // prefer Spin -> fallback Rotate -> fallback Idle.
     let (recall_frames_by_dir, _recall_name) = {
+        let spin_pre = decoded_sheets.get("Spin");
         let (spin_down, _, _, _, spin_fallback) = load_and_scale_animation(
-            "Spin",
-            &sheets,
-            &anim_infos,
-            scale,
-            Some((idle_w, idle_h)),
-            DIR_ROWS[0],
+            "Spin", &sheets, spin_pre, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[0],
         )?;
         if !spin_fallback {
             let spin_left = load_and_scale_animation(
-                "Spin",
-                &sheets,
-                &anim_infos,
-                scale,
-                Some((idle_w, idle_h)),
-                DIR_ROWS[1],
+                "Spin", &sheets, spin_pre, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[1],
             )
             .map(|r| r.0)
             .unwrap_or_else(|_| spin_down.clone());
             let spin_up = load_and_scale_animation(
-                "Spin",
-                &sheets,
-                &anim_infos,
-                scale,
-                Some((idle_w, idle_h)),
-                DIR_ROWS[2],
+                "Spin", &sheets, spin_pre, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[2],
             )
             .map(|r| r.0)
             .unwrap_or_else(|_| spin_down.clone());
             let spin_right = load_and_scale_animation(
-                "Spin",
-                &sheets,
-                &anim_infos,
-                scale,
-                Some((idle_w, idle_h)),
-                DIR_ROWS[3],
+                "Spin", &sheets, spin_pre, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[3],
             )
             .map(|r| r.0)
             .unwrap_or_else(|_| spin_down.clone());
-            ([spin_down, spin_left, spin_up, spin_right], "Spin")
+            (
+                [
+                    to_arc_frames(spin_down),
+                    to_arc_frames(spin_left),
+                    to_arc_frames(spin_up),
+                    to_arc_frames(spin_right),
+                ],
+                "Spin",
+            )
         } else {
+            let rotate_pre = decoded_sheets.get("Rotate");
             let (rotate_down, _rotate_anim, _rotate_w, _rotate_h, rotate_fallback) =
                 load_and_scale_animation(
-                    "Rotate",
-                    &sheets,
-                    &anim_infos,
-                    scale,
-                    Some((idle_w, idle_h)),
-                    DIR_ROWS[0],
+                    "Rotate", &sheets, rotate_pre, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[0],
                 )?;
             if !rotate_fallback {
                 let rotate_left = load_and_scale_animation(
-                    "Rotate",
-                    &sheets,
-                    &anim_infos,
-                    scale,
-                    Some((idle_w, idle_h)),
-                    DIR_ROWS[1],
+                    "Rotate", &sheets, rotate_pre, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[1],
                 )
                 .map(|r| r.0)
                 .unwrap_or_else(|_| rotate_down.clone());
                 let rotate_up = load_and_scale_animation(
-                    "Rotate",
-                    &sheets,
-                    &anim_infos,
-                    scale,
-                    Some((idle_w, idle_h)),
-                    DIR_ROWS[2],
+                    "Rotate", &sheets, rotate_pre, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[2],
                 )
                 .map(|r| r.0)
                 .unwrap_or_else(|_| rotate_down.clone());
                 let rotate_right = load_and_scale_animation(
-                    "Rotate",
-                    &sheets,
-                    &anim_infos,
-                    scale,
-                    Some((idle_w, idle_h)),
-                    DIR_ROWS[3],
+                    "Rotate", &sheets, rotate_pre, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[3],
                 )
                 .map(|r| r.0)
                 .unwrap_or_else(|_| rotate_down.clone());
                 (
-                    [rotate_down, rotate_left, rotate_up, rotate_right],
+                    [
+                        to_arc_frames(rotate_down),
+                        to_arc_frames(rotate_left),
+                        to_arc_frames(rotate_up),
+                        to_arc_frames(rotate_right),
+                    ],
                     "Rotate",
                 )
             } else {
@@ -312,49 +273,38 @@ pub fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<Stri
     // ── Hop (Playing) animation ───────────────────────────────────────────────
     // Try to load "Hop" from PMDCollab. Falls back to Idle frames when missing,
     // following the exact same pattern as Eat/Sleep above.
+    // "Hop" is not in ALL_ANIMS so it's never downloaded; pre_decoded is None.
     let (hop_down_raw, hop_timing_raw, _, _, hop_fallback) = load_and_scale_animation(
-        "Hop",
-        &sheets,
-        &anim_infos,
-        scale,
-        Some((idle_w, idle_h)),
-        DIR_ROWS[0],
+        "Hop", &sheets, None, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[0],
     )?;
     let (hop_frames_by_dir, hop_timing) = if hop_fallback {
         // No Hop sheet — reuse Idle frames so Playing looks like a livelier Idle.
         (slot.sprites.idle.clone(), idle_timing.clone())
     } else {
         let hop_left = load_and_scale_animation(
-            "Hop",
-            &sheets,
-            &anim_infos,
-            scale,
-            Some((idle_w, idle_h)),
-            DIR_ROWS[1],
+            "Hop", &sheets, None, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[1],
         )
         .map(|r| r.0)
         .unwrap_or_else(|_| hop_down_raw.clone());
         let hop_up = load_and_scale_animation(
-            "Hop",
-            &sheets,
-            &anim_infos,
-            scale,
-            Some((idle_w, idle_h)),
-            DIR_ROWS[2],
+            "Hop", &sheets, None, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[2],
         )
         .map(|r| r.0)
         .unwrap_or_else(|_| hop_down_raw.clone());
         let hop_right = load_and_scale_animation(
-            "Hop",
-            &sheets,
-            &anim_infos,
-            scale,
-            Some((idle_w, idle_h)),
-            DIR_ROWS[3],
+            "Hop", &sheets, None, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[3],
         )
         .map(|r| r.0)
         .unwrap_or_else(|_| hop_down_raw.clone());
-        ([hop_down_raw, hop_left, hop_up, hop_right], hop_timing_raw)
+        (
+            [
+                to_arc_frames(hop_down_raw),
+                to_arc_frames(hop_left),
+                to_arc_frames(hop_up),
+                to_arc_frames(hop_right),
+            ],
+            hop_timing_raw,
+        )
     };
     slot.sprites.hop = hop_frames_by_dir;
 
@@ -395,8 +345,88 @@ pub fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<Stri
     Ok(filtered_warnings)
 }
 
+/// Fast initial load: download and process **only** the Idle animation.
+///
+/// Used as Phase 1 of the two-phase startup load so creatures appear on screen
+/// as quickly as possible. All non-Idle states fall back to Idle frames until
+/// `load_slot_sprites` (Phase 2) completes and replaces the slot.
+pub fn load_slot_idle_only(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<String>> {
+    // Only download Idle-Anim.png + AnimData.xml (1 network request instead of 5+).
+    let (anim_data_path, sheets, warnings) =
+        sprite::download_sprites(slot.creature_id, &["Idle"])?;
+
+    let xml = std::fs::read_to_string(&anim_data_path)?;
+    let anim_infos = crate::anim_data::parse_anim_data(&xml);
+
+    const DIR_ROWS: [u32; 4] = [0, 6, 4, 2];
+
+    // Decode the Idle sheet once for all 4 directions.
+    let idle_pre: Option<image::DynamicImage> = sheets
+        .iter()
+        .find(|(n, _)| n == "Idle")
+        .and_then(|(_, p)| image::ImageReader::open(p).ok()?.decode().ok());
+    let idle_pre_ref = idle_pre.as_ref();
+
+    let (idle_down, idle_timing, idle_w, idle_h, _) = load_and_scale_animation(
+        "Idle", &sheets, idle_pre_ref, &anim_infos, scale, None, DIR_ROWS[0],
+    )?;
+    let idle_left = load_and_scale_animation(
+        "Idle", &sheets, idle_pre_ref, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[1],
+    )
+    .map(|r| r.0)
+    .unwrap_or_else(|_| idle_down.clone());
+    let idle_up = load_and_scale_animation(
+        "Idle", &sheets, idle_pre_ref, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[2],
+    )
+    .map(|r| r.0)
+    .unwrap_or_else(|_| idle_down.clone());
+    let idle_right = load_and_scale_animation(
+        "Idle", &sheets, idle_pre_ref, &anim_infos, scale, Some((idle_w, idle_h)), DIR_ROWS[3],
+    )
+    .map(|r| r.0)
+    .unwrap_or_else(|_| idle_down.clone());
+
+    slot.sprites.idle = [
+        to_arc_frames(idle_down.clone()),
+        to_arc_frames(idle_left),
+        to_arc_frames(idle_up),
+        to_arc_frames(idle_right),
+    ];
+    // All non-Idle animations fall back to Idle frames until Phase 2 loads them.
+    slot.sprites.eat = slot.sprites.idle.clone();
+    slot.sprites.sleep = slot.sprites.idle.clone();
+    slot.sprites.hop = slot.sprites.idle.clone();
+    slot.sprites.recall = slot.sprites.idle.clone();
+
+    slot.animator = crate::animation::Animator::new();
+    slot.animator
+        .load_animations(idle_timing.clone(), idle_timing.clone(), idle_timing.clone());
+    // hop_anim left as None — falls back to idle timing automatically.
+
+    slot.sprites.encoded_rect = None;
+    slot.sprites.encoded = std::array::from_fn(|_| std::array::from_fn(|_| Vec::new()));
+
+    // Suppress non-Idle warnings since those animations aren't loaded yet.
+    let filtered: Vec<String> = warnings
+        .into_iter()
+        .filter(|w| {
+            let w = w.to_lowercase();
+            !w.contains("eat")
+                && !w.contains("sleep")
+                && !w.contains("spin")
+                && !w.contains("rotate")
+                && !w.contains("hop")
+        })
+        .collect();
+    Ok(filtered)
+}
+
 /// Load an animation, pre-scale its frames by `scale`, cap to
 /// `MAX_CACHED_FRAMES`, then normalize to `canonical_size` (if provided).
+///
+/// `pre_decoded` is an already-decoded PNG image for `anim_name`.  Pass `Some`
+/// when loading multiple directions of the same animation so the PNG is only
+/// decoded once instead of once per direction.
 ///
 /// `dir_row` selects which PMDCollab direction row to extract (0=Down, 2=Left,
 /// 4=Up, 6=Right). If the sheet doesn't have that row, falls back to row 0.
@@ -408,6 +438,7 @@ pub fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<Stri
 pub fn load_and_scale_animation(
     anim_name: &str,
     sheets: &[(String, PathBuf)],
+    pre_decoded: Option<&image::DynamicImage>,
     anim_infos: &HashMap<String, AnimInfo>,
     scale: u32,
     canonical_size: Option<(u32, u32)>,
@@ -420,13 +451,25 @@ pub fn load_and_scale_animation(
 
     let anim_info = anim_infos.get(anim_name);
 
-    let (raw_frames, raw_durations, is_fallback) = match (sheet_path, anim_info) {
-        (Some(path), Some(info)) => {
-            let sheet = image::ImageReader::open(path)?.decode()?;
+    // Decode the sheet: prefer `pre_decoded` to avoid re-opening the file for
+    // every direction of the same animation.
+    let sheet_from_disk: Option<image::DynamicImage> = if pre_decoded.is_none() {
+        if let Some(path) = sheet_path {
+            Some(image::ImageReader::open(path)?.decode()?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let sheet_ref = pre_decoded.or(sheet_from_disk.as_ref());
+
+    let (raw_frames, raw_durations, is_fallback) = match (sheet_ref, anim_info) {
+        (Some(sheet), Some(info)) => {
             // Try requested direction row; fall back to row 0 if out of bounds.
-            let mut frames = sprite_sheet::extract_frames(&sheet, info, dir_row);
+            let mut frames = sprite_sheet::extract_frames(sheet, info, dir_row);
             if frames.is_empty() && dir_row != 0 {
-                frames = sprite_sheet::extract_frames(&sheet, info, 0);
+                frames = sprite_sheet::extract_frames(sheet, info, 0);
             }
             if frames.is_empty() {
                 let fallback = sprite::fallback::create_fallback_frame()?;
@@ -499,7 +542,7 @@ pub fn encode_all_frames(slot: &mut CreatureSlot, picker: &Picker, area: ratatui
     let hop = slot.sprites.hop.clone();
 
     // 5 caches: Idle=0, Eat=1, Sleep=2, Recall=3, Playing/Hop=4.
-    let caches: [&[Vec<image::DynamicImage>; 4]; 5] = [&idle, &eat, &sleep, &recall, &hop];
+    let caches: [&[Vec<Arc<image::DynamicImage>>; 4]; 5] = [&idle, &eat, &sleep, &recall, &hop];
     let is_halfblocks = picker.protocol_type() == ratatui_image::picker::ProtocolType::Halfblocks;
 
     slot.sprites.encoded = std::array::from_fn(|state_idx| {
@@ -508,12 +551,14 @@ pub fn encode_all_frames(slot: &mut CreatureSlot, picker: &Picker, area: ratatui
             cache[dir_idx]
                 .iter()
                 .map(|img| {
+                    // img is &Arc<DynamicImage>; deref to &DynamicImage for halfblocks,
+                    // and clone the underlying DynamicImage (not the Arc) for new_protocol.
                     if is_halfblocks {
                         encode_halfblock_frame(img, area)
                     } else {
                         picker
                             .new_protocol(
-                                img.clone(),
+                                img.as_ref().clone(),
                                 area,
                                 Resize::Scale(Some(FilterType::Nearest)),
                             )

@@ -2,7 +2,7 @@ use crate::animation::Animator;
 use image::DynamicImage;
 use ratatui_image::protocol::Protocol;
 use std::io::Write;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Maximum frames to cache per animation.  If the sprite sheet has more,
 /// we sample evenly-spaced frames so the animation still looks smooth.
@@ -49,11 +49,11 @@ impl Direction {
 /// pre-encoded `Protocol` objects into one place, reducing `CreatureSlot` from
 /// 7 separate cache fields to a single named group.
 pub struct SpriteCache {
-    pub idle: [Vec<DynamicImage>; 4],
-    pub eat: [Vec<DynamicImage>; 4],
-    pub sleep: [Vec<DynamicImage>; 4],
-    pub recall: [Vec<DynamicImage>; 4],
-    pub hop: [Vec<DynamicImage>; 4],
+    pub idle: [Vec<Arc<DynamicImage>>; 4],
+    pub eat: [Vec<Arc<DynamicImage>>; 4],
+    pub sleep: [Vec<Arc<DynamicImage>>; 4],
+    pub recall: [Vec<Arc<DynamicImage>>; 4],
+    pub hop: [Vec<Arc<DynamicImage>>; 4],
     /// Pre-encoded Protocol objects indexed by [state_index][dir_index][frame_index].
     /// state 0=Idle, 1=Eat, 2=Sleep, 3=Recall, 4=Playing (Hop).
     /// dir: 0=Down, 1=Left, 2=Up, 3=Right.
@@ -135,6 +135,9 @@ pub struct CreatureSlot {
     /// Cooldown (ticks) before accepting another velocity-driven facing change.
     /// Reduces rapid direction jitter when collisions/walls cause tiny flips.
     pub dir_cooldown_ticks: u8,
+    /// Set to `true` after the first render randomizes position and velocity.
+    /// Prevents re-randomization when sprites are reloaded (background load completes).
+    pub position_initialized: bool,
 }
 
 impl CreatureSlot {
@@ -159,6 +162,7 @@ impl CreatureSlot {
             xp_frac: 0.0,
             level: 1,
             anim_active_secs: 0.0,
+            position_initialized: false,
         }
     }
 
@@ -395,7 +399,8 @@ pub fn sprite_stack_h(sprite_h: u16) -> u16 {
 }
 
 /// Map velocity to a cardinal direction.
-/// Returns: Down, Left, Up, or Right.
+///
+/// Terminal Y increases downward, so positive vel_y = moving down the screen.
 pub fn velocity_to_dir(vel_x: f32, vel_y: f32) -> Direction {
     if vel_x.abs() < 0.01 && vel_y.abs() < 0.01 {
         return Direction::Down; // stationary → face down
@@ -407,9 +412,9 @@ pub fn velocity_to_dir(vel_x: f32, vel_y: f32) -> Direction {
             Direction::Left
         }
     } else if vel_y > 0.0 {
-        Direction::Up
-    } else {
         Direction::Down
+    } else {
+        Direction::Up
     }
 }
 
@@ -428,9 +433,9 @@ pub fn stable_velocity_to_dir(vel_x: f32, vel_y: f32, current_dir: Direction) ->
             Direction::Left
         }
     } else if vel_y > 0.0 {
-        Direction::Up
-    } else {
         Direction::Down
+    } else {
+        Direction::Up
     };
     // Only change if crossing diagonal threshold
     if new_dir != current_dir {

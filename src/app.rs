@@ -129,6 +129,13 @@ impl App {
     }
 
     /// Kick off background sprite loads for every slot in the initial roster.
+    ///
+    /// Uses a two-phase strategy per creature:
+    /// - **Phase 1**: download + process only Idle → slot appears on screen quickly.
+    /// - **Phase 2**: download + process all remaining animations → full state support.
+    ///
+    /// Both results are sent on the same channel; `update_startup_loads` applies
+    /// them in order, keeping the receiver alive until the thread exits.
     pub fn start_background_loads(&mut self) {
         let scale = self.config.scale;
         for (idx, slot) in self.slots.iter().enumerate() {
@@ -136,28 +143,51 @@ impl App {
             let name = slot.creature_name.clone();
             let (tx, rx) = mpsc::channel::<SwapWorkerResult>();
             std::thread::spawn(move || {
-                let mut new_slot = CreatureSlot::new(id, name);
-                let msg = match crate::sprite_loading::load_slot_sprites(&mut new_slot, scale) {
-                    Ok(warnings) => SwapWorkerResult::Loaded {
-                        slot: Box::new(new_slot),
-                        warnings,
-                    },
-                    Err(e) => SwapWorkerResult::Failed(e.to_string()),
-                };
-                let _ = tx.send(msg);
+                // Phase 1: load Idle only so the creature appears quickly.
+                let mut slot1 = CreatureSlot::new(id, name.clone());
+                match crate::sprite_loading::load_slot_idle_only(&mut slot1, scale) {
+                    Ok(warnings) => {
+                        let _ = tx.send(SwapWorkerResult::Loaded {
+                            slot: Box::new(slot1),
+                            warnings,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = tx.send(SwapWorkerResult::Failed(e.to_string()));
+                        return; // Can't continue without Idle
+                    }
+                }
+
+                // Phase 2: full load (downloads remaining animations in background).
+                let mut slot2 = CreatureSlot::new(id, name);
+                match crate::sprite_loading::load_slot_sprites(&mut slot2, scale) {
+                    Ok(warnings) => {
+                        let _ = tx.send(SwapWorkerResult::Loaded {
+                            slot: Box::new(slot2),
+                            warnings,
+                        });
+                    }
+                    Err(_) => {
+                        // Non-fatal: creature is already visible with Idle fallback.
+                    }
+                }
+                // tx dropped here → Disconnected signals receiver to stop.
             });
             self.startup_loads.push((idx, id, rx));
         }
     }
 
     /// Poll completed startup loads and apply them.
+    ///
+    /// Keeps each receiver alive until the sending thread exits (Disconnected),
+    /// so that Phase 1 and Phase 2 results are both received and applied.
     fn update_startup_loads(&mut self) {
         let mut completions: Vec<(usize, u32, SwapWorkerResult)> = Vec::new();
         self.startup_loads
             .retain(|(slot_index, creature_id, rx)| match rx.try_recv() {
                 Ok(result) => {
                     completions.push((*slot_index, *creature_id, result));
-                    false
+                    true // Keep until Disconnected — Phase 2 may send another message.
                 }
                 Err(mpsc::TryRecvError::Empty) => true,
                 Err(mpsc::TryRecvError::Disconnected) => false,
@@ -183,6 +213,8 @@ impl App {
                     slot.pause_ticks = existing.pause_ticks;
                     slot.pause_face_down = existing.pause_face_down;
                     slot.dir_cooldown_ticks = existing.dir_cooldown_ticks;
+                    // Preserve initialized flag so render_pen doesn't re-randomize position.
+                    slot.position_initialized = existing.position_initialized;
                     // Preserve persisted XP and level.
                     slot.level = existing.level;
                     slot.xp = existing.xp;
