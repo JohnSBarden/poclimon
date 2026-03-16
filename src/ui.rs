@@ -327,7 +327,10 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
         let slot = &mut app.slots[i];
 
         // First time this slot enters the pen: randomize position and velocity.
-        if slot.sprites.encoded_rect.is_none() {
+        // Gated on `position_initialized` (not `encoded_rect`) so that when
+        // background sprite loads complete and replace the slot, the creature
+        // doesn't jump to a new random position.
+        if !slot.position_initialized {
             use rand::Rng;
             let mut rng = rand::thread_rng();
             let max_px = (pen_inner.width.saturating_sub(sprite_w)) as f32;
@@ -356,6 +359,7 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
                 slot.vel_y = if slot.vel_y >= 0.0 { 0.18 } else { -0.18 };
             }
             slot.dir_hold_ticks = rng.gen_range(40_u32..160);
+            slot.position_initialized = true;
         }
 
         // Lazily encode (or re-encode on resize) — compare size only, not position.
@@ -374,8 +378,6 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
         let mut state_idx = state.encoded_index();
         // Playing: snap to Left/Right only — hop sprites don't have meaningful
         // Up/Down frames and it looks odd when the creature briefly faces away.
-        // Use the current horizontal velocity to pick the side, so it stays
-        // consistent with where the creature will hop next.
         let dir_idx = if state == AnimationState::Playing {
             if slot.vel_x >= 0.0 {
                 Direction::Right.as_index()
@@ -607,38 +609,30 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
                     .saturating_sub(crate::creature::sprite_stack_h(sprite_h)),
         );
 
-        // Use the true rendered sprite width (same as nameplate logic).
-        let actual_sprite_w = pick_protocol_index(&slot.sprites.encoded, 0, 0, 0)
-            .and_then(|(si, di, fi)| slot.sprites.encoded[si][di][fi].as_ref())
-            .map(|p| p.area().width)
-            .unwrap_or(sprite_w);
-
         let rx = render_x as i32;
         let ry = render_y as i32;
-        let sw = actual_sprite_w as i32;
+        let sw = sprite_w as i32;
         let sh = sprite_h as i32;
         let tw = TOY_W as i32;
         let th = toy_h as i32;
 
-        // Mirror the dir_idx snap above: Playing is always Left or Right.
-        // Pull the toy 4 cells into the sprite allocation to close any gap
-        // from transparent padding around the PMDCollab sprite art.
-        // East-facing sprites (vel_x >= 0) have the face on the RIGHT → toy to
-        // the right. West-facing (vel_x < 0) have the face on the LEFT → toy
-        // to the left. Clamp to pen bounds: on halfblock terminals actual_sprite_w
-        // equals the full sprite_w allocation (32 cols), so right-side placement
-        // would always overflow the pen wall without clamping.
+        // East-facing (vel_x >= 0): face/toy right
+        // Clamp to terminal bounds for a valid u16 Rect; ratatui clips at the edge.
+        //
+        // INSET pulls the toy inside the sprite's bounding box to close the gap
+        // caused by transparent padding around the PMDCollab sprite art. Without
+        // it the toy renders at the bounding-box edge, far from the visible art.
+        const INSET: i32 = 4;
+        let term_w = f.area().width as i32;
+        let term_h = f.area().height as i32;
         let toy_mid_y = ry + sh / 2 - th / 2;
-        let (toy_x_ideal, toy_y_ideal) = if slot.vel_x >= 0.0 {
-            (rx + sw, toy_mid_y)
+        let toy_x_ideal = if slot.vel_x >= 0.0 {
+            rx + sw - INSET
         } else {
-            (rx - tw, toy_mid_y)
+            rx - tw + INSET
         };
-
-        let px = pen_inner.x as i32;
-        let py = pen_inner.y as i32;
-        let toy_x = toy_x_ideal.clamp(px, px + pen_inner.width as i32 - tw);
-        let toy_y = toy_y_ideal.clamp(py, py + pen_inner.height as i32 - th);
+        let toy_x = toy_x_ideal.clamp(0, term_w - tw);
+        let toy_y = toy_mid_y.clamp(0, term_h - th);
 
         if let Some(proto) = app.toy_proto.as_mut() {
             f.render_widget(

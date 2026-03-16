@@ -18,8 +18,8 @@ const SPRITECOLLAB_BASE: &str =
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// The animation names we need for our virtual pet.
-const NEEDED_ANIMS: &[&str] = &["Idle", "Sleep", "Eat", "Spin", "Rotate"];
+/// All animations loaded during the full (Phase 2) background load.
+const ALL_ANIMS: &[&str] = &["Idle", "Eat", "Sleep", "Spin", "Rotate"];
 
 /// Result type for [`download_all_sprites`]:
 /// `(anim_data_path, downloaded_sheets, warning_messages)`.
@@ -83,14 +83,16 @@ fn download_file(url: &str, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Download all needed sprites for a creature (AnimData.xml + sprite sheets).
+/// Download sprites for a creature: AnimData.xml plus the requested animation sheets.
+///
+/// Pass `&["Idle"]` for a fast initial load, or `ALL_ANIMS` for a full load.
 ///
 /// Returns `(anim_data_path, sheets, warnings)`.
 /// - `sheets`: successfully downloaded `(anim_name, path)` pairs.
 /// - `warnings`: non-fatal messages for any animation that couldn't be
 ///   downloaded (e.g., a missing sheet); the caller displays these via
 ///   the in-TUI notification system rather than writing to stderr.
-pub fn download_all_sprites(creature_id: u32) -> Result<SpriteDownloadResult> {
+pub fn download_sprites(creature_id: u32, anims: &[&str]) -> Result<SpriteDownloadResult> {
     let cache_dir = sprite_cache_dir(creature_id)?;
     let pid = creatures::padded_id(creature_id);
 
@@ -101,8 +103,8 @@ pub fn download_all_sprites(creature_id: u32) -> Result<SpriteDownloadResult> {
         Ok(anim_dest)
     });
 
-    let mut sheet_handles = Vec::with_capacity(NEEDED_ANIMS.len());
-    for &anim_name in NEEDED_ANIMS {
+    let mut sheet_handles = Vec::with_capacity(anims.len());
+    for &anim_name in anims {
         let filename = format!("{anim_name}-Anim.png");
         let dest = cache_dir.join(&filename);
         let url = format!("{SPRITECOLLAB_BASE}/{pid}/{filename}");
@@ -136,4 +138,9 @@ pub fn download_all_sprites(creature_id: u32) -> Result<SpriteDownloadResult> {
     }
 
     Ok((anim_data_path, sheets, warnings))
+}
+
+/// Download all animations needed for a full sprite load.
+pub fn download_all_sprites(creature_id: u32) -> Result<SpriteDownloadResult> {
+    download_sprites(creature_id, ALL_ANIMS)
 }
