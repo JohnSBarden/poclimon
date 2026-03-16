@@ -15,7 +15,7 @@ use image::{DynamicImage, GenericImage, GenericImageView, RgbaImage};
 /// Extract individual animation frames from a sprite sheet.
 ///
 /// The sprite sheet layout:
-/// - Each row is a direction (row 0 = Down, row 2 = Left, row 4 = Up, row 6 = Right)
+/// - Each row is a direction (row 0 = Down, row 2 = Right, row 4 = Up, row 6 = Left)
 /// - Each column is a frame
 /// - Frame size is defined by `anim_info.frame_width` x `anim_info.frame_height`
 ///

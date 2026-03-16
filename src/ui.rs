@@ -623,24 +623,24 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
         // Mirror the dir_idx snap above: Playing is always Left or Right.
         // Pull the toy 4 cells into the sprite allocation to close any gap
         // from transparent padding around the PMDCollab sprite art.
-        const INSET: i32 = 4;
+        // East-facing sprites (vel_x >= 0) have the face on the RIGHT → toy to
+        // the right. West-facing (vel_x < 0) have the face on the LEFT → toy
+        // to the left. Clamp to pen bounds: on halfblock terminals actual_sprite_w
+        // equals the full sprite_w allocation (32 cols), so right-side placement
+        // would always overflow the pen wall without clamping.
         let toy_mid_y = ry + sh / 2 - th / 2;
-        let (toy_x, toy_y) = if slot.vel_x >= 0.0 {
-            // Facing right → toy in front, to the right
-            (rx + sw - INSET, toy_mid_y)
+        let (toy_x_ideal, toy_y_ideal) = if slot.vel_x >= 0.0 {
+            (rx + sw, toy_mid_y)
         } else {
-            // Facing left → toy in front, to the left
-            (rx - tw + INSET, toy_mid_y)
+            (rx - tw, toy_mid_y)
         };
 
         let px = pen_inner.x as i32;
         let py = pen_inner.y as i32;
-        let fits = toy_x >= px
-            && toy_y >= py
-            && toy_x + tw <= px + pen_inner.width as i32
-            && toy_y + th <= py + pen_inner.height as i32;
+        let toy_x = toy_x_ideal.clamp(px, px + pen_inner.width as i32 - tw);
+        let toy_y = toy_y_ideal.clamp(py, py + pen_inner.height as i32 - th);
 
-        if fits && let Some(proto) = app.toy_proto.as_mut() {
+        if let Some(proto) = app.toy_proto.as_mut() {
             f.render_widget(
                 Image::new(proto),
                 Rect::new(toy_x as u16, toy_y as u16, TOY_W, toy_h),

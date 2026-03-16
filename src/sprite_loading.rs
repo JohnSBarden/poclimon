@@ -78,9 +78,9 @@ pub fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<Stri
     let xml = std::fs::read_to_string(&anim_data_path)?;
     let anim_infos = crate::anim_data::parse_anim_data(&xml);
 
-    // PMDCollab direction row indices: 0=Down, 2=Left, 4=Up, 6=Right
-    // Our dir_idx mapping:             0=Down, 1=Left, 2=Up, 3=Right
-    const DIR_ROWS: [u32; 4] = [0, 2, 4, 6];
+    // PMDCollab direction row indices: 0=Down, 2=Right, 4=Up, 6=Left
+    // Our dir_idx mapping:             0=Down, 1=Left,  2=Up, 3=Right
+    const DIR_ROWS: [u32; 4] = [0, 6, 4, 2];
 
     // Load Idle for all 4 directions — use dir 0 (Down) to establish canonical size.
     let (idle_down, idle_timing, idle_w, idle_h, _) =
