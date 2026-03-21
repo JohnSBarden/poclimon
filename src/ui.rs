@@ -8,8 +8,16 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph},
 };
+
+// ── Game Boy DMG 4-color palette ─────────────────────────────────────────────
+const GB_DARKEST: Color = Color::Rgb(15, 56, 15); // near-black green
+const GB_DARK: Color = Color::Rgb(48, 98, 48); // mid-dark green
+const GB_LIGHT: Color = Color::Rgb(139, 172, 15); // light green
+const GB_LIGHTEST: Color = Color::Rgb(155, 188, 15); // near-white green
+const FENCE_BROWN: Color = Color::Rgb(139, 101, 8); // wooden fence
+const GRASS_GREEN: Color = Color::Rgb(34, 139, 34); // short grass blades
 
 mod title_art {
     include!(concat!(env!("OUT_DIR"), "/title_art.rs"));
@@ -135,21 +143,34 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
         .unwrap_or_else(|| "???".to_string());
 
     let title = Paragraph::new(Line::from(vec![
-        Span::styled("PoCLImon", Style::default().fg(Color::Yellow)),
+        Span::styled(
+            "PoCLImon",
+            Style::default()
+                .fg(GB_LIGHTEST)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" — "),
         Span::styled(
             format!("{} creatures", app.slots.len()),
-            Style::default().fg(Color::LightYellow),
+            Style::default().fg(GB_LIGHT),
         ),
         Span::styled(
             format!(" [selected: {selected_name}]"),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(GB_DARK),
         ),
     ]))
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title(format!("⚡ PoCLImon {version}")),
+            .border_type(BorderType::Thick)
+            .border_style(Style::default().fg(GB_LIGHT))
+            .style(Style::default().bg(GB_DARKEST))
+            .title(format!("◆ PoCLImon {version} ◆"))
+            .title_style(
+                Style::default()
+                    .fg(GB_LIGHTEST)
+                    .add_modifier(Modifier::BOLD),
+            ),
     );
     f.render_widget(title, chunks[0]);
 
@@ -183,7 +204,10 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
     // Line 0: current creature state.
     // Lines 1–2: most recent notifications, newest first.
     let mut status_lines = vec![Line::from(vec![
-        Span::raw(format!("{selected_name}: ")),
+        Span::styled(
+            format!("{selected_name}: "),
+            Style::default().fg(GB_LIGHTEST),
+        ),
         Span::styled(state_label, Style::default().fg(status_color)),
     ])];
     if let Some(transition) = app.swap_transition.as_ref() {
@@ -228,7 +252,7 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
         let (prefix, color) = match notif.level {
             NotifLevel::Error => ("[Error] ", Color::Red),
             NotifLevel::Warn => ("[Warn]  ", Color::Yellow),
-            NotifLevel::Info => ("[Info]  ", Color::DarkGray),
+            NotifLevel::Info => ("[Info]  ", GB_DARK),
         };
         status_lines.push(Line::from(vec![
             Span::styled(prefix, Style::default().fg(color)),
@@ -236,15 +260,47 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
         ]));
     }
 
-    let status = Paragraph::new(status_lines).block(Block::default().borders(Borders::ALL));
+    let status = Paragraph::new(status_lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Thick)
+            .border_style(Style::default().fg(GB_LIGHT))
+            .style(Style::default().bg(GB_DARKEST)),
+    );
     f.render_widget(status, chunks[2]);
 
     // Help bar
-    let help = Paragraph::new(
-        "[E]at [S]leep [I]dle [P]lay [←/→] [1-6] [A]dd # [Tab]Swap # [R]emove [Q]uit",
-    )
-    .style(Style::default().fg(Color::DarkGray))
-    .block(Block::default().borders(Borders::ALL));
+    let help_pairs: &[(&str, &str)] = &[
+        ("[Q]", "uit"),
+        ("[E]", "at"),
+        ("[S]", "leep"),
+        ("[I]", "dle"),
+        ("[P]", "lay"),
+        ("[A]", "dd"),
+        ("[R]", "emove"),
+        ("[Tab]", "swap"),
+        ("[←→]", "select"),
+    ];
+    let mut help_spans: Vec<Span> = Vec::new();
+    for (i, (key, action)) in help_pairs.iter().enumerate() {
+        if i > 0 {
+            help_spans.push(Span::raw("  "));
+        }
+        help_spans.push(Span::styled(
+            *key,
+            Style::default()
+                .fg(GB_LIGHTEST)
+                .add_modifier(Modifier::BOLD),
+        ));
+        help_spans.push(Span::styled(*action, Style::default().fg(GB_DARK)));
+    }
+    let help = Paragraph::new(Line::from(help_spans)).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Thick)
+            .border_style(Style::default().fg(GB_LIGHT))
+            .style(Style::default().bg(GB_DARKEST)),
+    );
     f.render_widget(help, chunks[3]);
 
     // Prompt overlay — appears centered over the pen area when Add or Swap is active.
@@ -267,7 +323,8 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
         let block = Block::default()
             .borders(Borders::ALL)
             .title(title)
-            .border_style(Style::default().fg(Color::Yellow));
+            .border_style(Style::default().fg(Color::Yellow))
+            .style(Style::default().bg(GB_DARKEST));
         let inner = block.inner(popup_area);
         f.render_widget(block, popup_area);
 
@@ -275,7 +332,7 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
         let input_text = format!("Pokédex #: {}█", app.prompt_buffer);
         let row1 = Rect::new(inner.x, inner.y, inner.width, 1);
         f.render_widget(
-            Paragraph::new(input_text).style(Style::default().fg(Color::White)),
+            Paragraph::new(input_text).style(Style::default().fg(GB_LIGHTEST)),
             row1,
         );
 
@@ -297,9 +354,74 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
     }
 
     // Single outer border — no inner dividers.
-    let block = Block::default().borders(Borders::ALL).title("🌿 Pen");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Thick)
+        .border_style(Style::default().fg(FENCE_BROWN))
+        .style(Style::default().bg(GB_DARKEST))
+        .title(" 🌿 Pen ")
+        .title_style(
+            Style::default()
+                .fg(GB_LIGHTEST)
+                .add_modifier(Modifier::BOLD),
+        );
     let pen_inner = block.inner(area);
     f.render_widget(block, area);
+
+    // ── Phase 0: Background + grass decorations ───────────────────────────────
+    // 0a. Solid background fill
+    f.render_widget(
+        Block::default().style(Style::default().bg(GB_DARKEST)),
+        pen_inner,
+    );
+
+    // 0b. Short grass tiles — deterministic per cell position
+    for row in 0..pen_inner.height {
+        let y = pen_inner.y + row;
+        let spans: Vec<Span> = (0..pen_inner.width)
+            .map(|col| {
+                let x = pen_inner.x + col;
+                let hash =
+                    (x as u32).wrapping_mul(2_654_435_761) ^ (y as u32).wrapping_mul(2_246_822_519);
+                match hash % 9 {
+                    0 => Span::styled("\"", Style::default().fg(GRASS_GREEN).bg(GB_DARKEST)),
+                    1 => Span::styled("'", Style::default().fg(GRASS_GREEN).bg(GB_DARKEST)),
+                    8 => Span::styled(
+                        "*",
+                        Style::default().fg(Color::Rgb(200, 200, 50)).bg(GB_DARKEST),
+                    ),
+                    _ => Span::styled(" ", Style::default().bg(GB_DARKEST)),
+                }
+            })
+            .collect();
+        f.render_widget(
+            Paragraph::new(Line::from(spans)),
+            Rect::new(pen_inner.x, y, pen_inner.width, 1),
+        );
+    }
+
+    // 0c. Fence posts along top and bottom inner edge rows, every 4 columns
+    for col in (0..pen_inner.width).step_by(4) {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "┃",
+                Style::default().fg(FENCE_BROWN).bg(GB_DARKEST),
+            )),
+            Rect::new(pen_inner.x + col, pen_inner.y, 1, 1),
+        );
+    }
+    if pen_inner.height > 0 {
+        let bottom_y = pen_inner.y + pen_inner.height - 1;
+        for col in (0..pen_inner.width).step_by(4) {
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    "┃",
+                    Style::default().fg(FENCE_BROWN).bg(GB_DARKEST),
+                )),
+                Rect::new(pen_inner.x + col, bottom_y, 1, 1),
+            );
+        }
+    }
 
     let selected = app.selected;
     let transition_slot_index = app.transition_slot_index();
@@ -372,7 +494,19 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
         let state = slot.animator.state();
         let mut frame_idx = slot.animator.current_frame_index().unwrap_or(0);
         let mut state_idx = state.encoded_index();
-        let dir_idx = slot.current_dir.as_index();
+        // Playing: snap to Left/Right only — hop sprites don't have meaningful
+        // Up/Down frames and it looks odd when the creature briefly faces away.
+        // Use the current horizontal velocity to pick the side, so it stays
+        // consistent with where the creature will hop next.
+        let dir_idx = if state == AnimationState::Playing {
+            if slot.vel_x >= 0.0 {
+                Direction::Right.as_index()
+            } else {
+                Direction::Left.as_index()
+            }
+        } else {
+            slot.current_dir.as_index()
+        };
 
         let render_x = (pen_inner.x + slot.pos_x.round() as u16)
             .min(pen_inner.x + pen_inner.width.saturating_sub(sprite_w));
@@ -487,23 +621,21 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
             if is_selected { "◉" } else { " " },
             slot.creature_name.to_uppercase()
         );
-        // Row 2: show level + XP progress when in an active (XP-earning or
-        // sleeping) state; just the level when Idle (no XP accrues while Idle).
+        // Row 2: show level + XP bar when in an active (XP-earning) state;
+        // just the level when Idle (no XP accrues while Idle).
         let level_display = {
             let threshold = 50 * slot.level;
+            let filled = if threshold > 0 {
+                (slot.xp * 8 / threshold).min(8) as usize
+            } else {
+                0
+            };
+            let bar: String = "▓".repeat(filled) + &"░".repeat(8 - filled);
             match slot.animator.state() {
-                // Idle: just show level — no XP bar since XP doesn't accrue.
                 AnimationState::Idle => format!("Lv.{}", slot.level),
-                // Active states: show level, XP progress, and emoji icon.
-                AnimationState::Eating => {
-                    format!("Lv.{}  {}/{}xp  🍖", slot.level, slot.xp, threshold)
-                }
-                AnimationState::Sleeping => {
-                    format!("Lv.{}  {}/{}xp  💤", slot.level, slot.xp, threshold)
-                }
-                AnimationState::Playing => {
-                    format!("Lv.{}  {}/{}xp  🧸", slot.level, slot.xp, threshold)
-                }
+                AnimationState::Eating => format!("Lv.{} [{}] 🍖", slot.level, bar),
+                AnimationState::Sleeping => format!("Lv.{} [{}] 💤", slot.level, bar),
+                AnimationState::Playing => format!("Lv.{} [{}] 🧸", slot.level, bar),
             }
         };
 
@@ -528,23 +660,29 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
 
         if label_y + LABEL_H <= pen_inner.y + pen_inner.height {
             let label_area = Rect::new(label_x, label_y, label_w, LABEL_H);
-            let name_color = if is_selected {
-                Color::Yellow
-            } else {
-                Color::White
-            };
-            let block = Block::default().borders(Borders::ALL);
+            let name_color = if is_selected { GB_LIGHTEST } else { GB_LIGHT };
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Thick)
+                .border_style(Style::default().fg(if is_selected { GB_LIGHTEST } else { GB_DARK }))
+                .style(Style::default().bg(GB_DARKEST));
             let inner = block.inner(label_area);
             f.render_widget(block, label_area);
 
             let row1 = Rect::new(inner.x, inner.y, inner.width, 1);
             let row2 = Rect::new(inner.x, inner.y + 1, inner.width, 1);
             f.render_widget(
-                Paragraph::new(name_display).style(Style::default().fg(name_color)),
+                Paragraph::new(name_display).style(Style::default().fg(name_color).add_modifier(
+                    if is_selected {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    },
+                )),
                 row1,
             );
             f.render_widget(
-                Paragraph::new(level_display).style(Style::default().fg(Color::DarkGray)),
+                Paragraph::new(level_display).style(Style::default().fg(GB_LIGHT)),
                 row2,
             );
         }
@@ -608,15 +746,17 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
         let tw = TOY_W as i32;
         let th = toy_h as i32;
 
-        let (toy_x, toy_y) = match slot.current_dir {
-            // Down  — just below, horizontally centred on the sprite
-            Direction::Down => (rx + sw / 2 - tw / 2, ry + sh),
-            // Left  — face on right side of the Left sprite → toy to the right
-            Direction::Left => (rx + sw, ry + sh / 2 - th / 2),
-            // Up    — just above, horizontally centred on the sprite
-            Direction::Up => (rx + sw / 2 - tw / 2, ry - th),
-            // Right — face on left side of the Right sprite → toy to the left
-            Direction::Right => (rx - tw, ry + sh / 2 - th / 2),
+        // Mirror the dir_idx snap above: Playing is always Left or Right.
+        // Pull the toy 4 cells into the sprite allocation to close any gap
+        // from transparent padding around the PMDCollab sprite art.
+        const INSET: i32 = 4;
+        let toy_mid_y = ry + sh / 2 - th / 2;
+        let (toy_x, toy_y) = if slot.vel_x >= 0.0 {
+            // Facing right → toy in front, to the right
+            (rx + sw - INSET, toy_mid_y)
+        } else {
+            // Facing left → toy in front, to the left
+            (rx - tw + INSET, toy_mid_y)
         };
 
         let px = pen_inner.x as i32;
