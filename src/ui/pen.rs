@@ -1,353 +1,47 @@
+use super::theme::{FENCE_BROWN, GB_DARK, GB_DARKEST, GB_LIGHT, GB_LIGHTEST, GRASS_GREEN};
 use crate::animation::AnimationState;
-use crate::app::{App, PromptMode};
-use crate::creature::{Direction, LABEL_H, LABEL_OVERLAP, SPRITE_H, SPRITE_H_HALFBLOCKS, SPRITE_W};
-use crate::notification::NotifLevel;
-use crate::sprite_loading::encode_all_frames;
+use crate::app::App;
+use crate::creature::{
+    CreatureSlot, Direction, LABEL_H, LABEL_OVERLAP, RECALL_FLASH_SHRINK_DELAY_TICKS, RECALL_TICKS,
+    SPRITE_H, SPRITE_H_HALFBLOCKS, SPRITE_W, debug_log, sprite_stack_h,
+};
+use crate::sprite_loading::{encode_all_frames, encode_toy_image};
+use rand::Rng;
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Layout, Rect},
+    layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
+    widgets::{Block, BorderType, Borders, Paragraph},
 };
-
-// ── Game Boy DMG 4-color palette ─────────────────────────────────────────────
-const GB_DARKEST: Color = Color::Rgb(15, 56, 15); // near-black green
-const GB_DARK: Color = Color::Rgb(48, 98, 48); // mid-dark green
-const GB_LIGHT: Color = Color::Rgb(139, 172, 15); // light green
-const GB_LIGHTEST: Color = Color::Rgb(155, 188, 15); // near-white green
-const FENCE_BROWN: Color = Color::Rgb(139, 101, 8); // wooden fence
-const GRASS_GREEN: Color = Color::Rgb(34, 139, 34); // short grass blades
-
-mod title_art {
-    include!(concat!(env!("OUT_DIR"), "/title_art.rs"));
-}
 use ratatui_image::{
     Image,
     picker::{Picker, ProtocolType},
     protocol::Protocol,
 };
 
-pub fn render_splash(f: &mut Frame<'_>) {
-    let area = f.area();
-    let img_rows = title_art::TITLE_ROWS as u16;
-    let img_cols = title_art::TITLE_COLS as u16;
-    let data = &title_art::TITLE_ART;
-
-    // ▀/▄ chosen per cell so Color::Reset is never used as fg (which would
-    // render the terminal's text color instead of the background).
-    let art_lines: Vec<Line> = (0..title_art::TITLE_ROWS)
-        .map(|row| {
-            let spans: Vec<Span> = (0..title_art::TITLE_COLS)
-                .map(|col| {
-                    let (tr, tg, tb, ta, br, bg_r, bb, ba) =
-                        data[row * title_art::TITLE_COLS + col];
-                    let top_on = ta >= 128;
-                    let bot_on = ba >= 128;
-                    match (top_on, bot_on) {
-                        (true, true) => Span::styled(
-                            "▀",
-                            Style::default()
-                                .fg(Color::Rgb(tr, tg, tb))
-                                .bg(Color::Rgb(br, bg_r, bb)),
-                        ),
-                        (true, false) => Span::styled(
-                            "▀",
-                            Style::default().fg(Color::Rgb(tr, tg, tb)).bg(Color::Reset),
-                        ),
-                        (false, true) => Span::styled(
-                            "▄",
-                            Style::default()
-                                .fg(Color::Rgb(br, bg_r, bb))
-                                .bg(Color::Reset),
-                        ),
-                        (false, false) => Span::raw(" "),
-                    }
-                })
-                .collect();
-            Line::from(spans)
-        })
-        .collect();
-
-    let top_pad = area.height.saturating_sub(img_rows + 9) / 2;
-    let chunks = Layout::vertical([
-        Constraint::Length(top_pad),  // top padding
-        Constraint::Length(img_rows), // logo
-        Constraint::Length(1),        // blank
-        Constraint::Length(1),        // version
-        Constraint::Length(2),        // blank
-        Constraint::Length(1),        // github handle
-        Constraint::Length(1),        // blank
-        Constraint::Length(1),        // trademark 1
-        Constraint::Length(1),        // trademark 2
-        Constraint::Length(1),        // trademark 3
-        Constraint::Min(0),           // bottom padding
-    ])
-    .split(area);
-
-    let img_x = area.x + area.width.saturating_sub(img_cols) / 2;
-    f.render_widget(
-        Paragraph::new(art_lines),
-        Rect::new(img_x, chunks[1].y, img_cols.min(area.width), img_rows),
-    );
-
-    f.render_widget(
-        Paragraph::new(format!("v{}", env!("CARGO_PKG_VERSION")))
-            .style(Style::default().fg(Color::Gray))
-            .alignment(Alignment::Center),
-        chunks[3],
-    );
-
-    f.render_widget(
-        Paragraph::new("@JohnSBarden")
-            .style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .alignment(Alignment::Center),
-        chunks[5],
-    );
-
-    for (i, text) in [
-        "Pokemon and all related names are trademarks of",
-        "Nintendo / Creatures Inc. / GAME FREAK inc.",
-        "PoCLImon is an unofficial fan project.",
-    ]
-    .iter()
-    .enumerate()
-    {
-        f.render_widget(
-            Paragraph::new(*text)
-                .style(Style::default().fg(Color::DarkGray))
-                .alignment(Alignment::Center),
-            chunks[7 + i],
-        );
-    }
+fn sprite_render_pos(
+    slot: &CreatureSlot,
+    pen_inner: Rect,
+    sprite_w: u16,
+    sprite_h: u16,
+) -> (u16, u16) {
+    let render_x = (pen_inner.x + slot.pos_x.round() as u16)
+        .min(pen_inner.x + pen_inner.width.saturating_sub(sprite_w));
+    let render_y = (pen_inner.y + slot.pos_y.round() as u16)
+        .min(pen_inner.y + pen_inner.height.saturating_sub(sprite_stack_h(sprite_h)));
+    (render_x, render_y)
 }
 
-pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) {
-    let chunks = Layout::vertical([
-        Constraint::Length(3), // Title bar
-        Constraint::Min(10),   // Pen (shared creature canvas)
-        Constraint::Length(5), // Status + notifications (3 inner rows)
-        Constraint::Length(3), // Help bar
-    ])
-    .split(f.area());
-
-    // Collect data before mutable borrows.
-    let selected_name: String = app
-        .slots
-        .get(app.selected)
-        .map(|s| s.creature_name.clone())
-        .unwrap_or_else(|| "???".to_string());
-
-    let title = Paragraph::new(Line::from(vec![
-        Span::styled(
-            "PoCLImon",
-            Style::default()
-                .fg(GB_LIGHTEST)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" — "),
-        Span::styled(
-            format!("{} creatures", app.slots.len()),
-            Style::default().fg(GB_LIGHT),
-        ),
-        Span::styled(
-            format!(" [selected: {selected_name}]"),
-            Style::default().fg(GB_DARK),
-        ),
-    ]))
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Thick)
-            .border_style(Style::default().fg(GB_LIGHT))
-            .style(Style::default().bg(GB_DARKEST))
-            .title(format!("◆ PoCLImon {version} ◆"))
-            .title_style(
-                Style::default()
-                    .fg(GB_LIGHTEST)
-                    .add_modifier(Modifier::BOLD),
-            ),
-    );
-    f.render_widget(title, chunks[0]);
-
-    // Gather status info before mutable borrow.
-    let state_label = app
-        .slots
-        .get(app.selected)
-        .map(|s| match s.animator.state() {
-            AnimationState::Idle => "Idle",
-            AnimationState::Eating => "Nomming 🍖",
-            AnimationState::Sleeping => "Sleeping 💤",
-            AnimationState::Playing => "Playing 🧸",
-        })
-        .unwrap_or("—");
-    let status_color = app
-        .slots
-        .get(app.selected)
-        .map(|s| match s.animator.state() {
-            AnimationState::Idle => Color::Green,
-            AnimationState::Eating => Color::Yellow,
-            AnimationState::Sleeping => Color::Blue,
-            // Magenta distinguishes Playing from other states at a glance.
-            AnimationState::Playing => Color::Magenta,
-        })
-        .unwrap_or(Color::White);
-
-    // Shared pen — all creatures on one open canvas.
-    render_pen(f, chunks[1], app, picker);
-
-    // Status + notification panel.
-    // Line 0: current creature state.
-    // Lines 1–2: most recent notifications, newest first.
-    let mut status_lines = vec![Line::from(vec![
-        Span::styled(
-            format!("{selected_name}: "),
-            Style::default().fg(GB_LIGHTEST),
-        ),
-        Span::styled(state_label, Style::default().fg(status_color)),
-    ])];
-    if let Some(transition) = app.swap_transition.as_ref() {
-        let action = if transition.recall_ticks > 0 {
-            "Recalling"
-        } else {
-            "Loading"
-        };
-        let display_name = if transition.recall_ticks > 0 {
-            // Show the outgoing Pokémon during recall
-            app.slots
-                .get(transition.slot_index)
-                .map(|s| s.creature_name.clone())
-                .unwrap_or_else(|| "???".to_string())
-        } else {
-            // Show the incoming Pokémon during load
-            transition.target_name.clone()
-        };
-        status_lines.push(Line::from(vec![
-            Span::styled("[Swap]  ", Style::default().fg(Color::LightMagenta)),
-            Span::styled(
-                format!("{action} {display_name}..."),
-                Style::default().fg(Color::LightMagenta),
-            ),
-        ]));
-    } else if let Some(transition) = app.add_transition.as_ref() {
-        status_lines.push(Line::from(vec![
-            Span::styled("[Add]   ", Style::default().fg(Color::LightMagenta)),
-            Span::styled(
-                format!("Loading {}...", transition.target_name),
-                Style::default().fg(Color::LightMagenta),
-            ),
-        ]));
-    }
-
-    let notif_rows = if app.swap_transition.is_some() || app.add_transition.is_some() {
-        1
-    } else {
-        2
-    };
-    for notif in app.notifications.iter().rev().take(notif_rows) {
-        let (prefix, color) = match notif.level {
-            NotifLevel::Error => ("[Error] ", Color::Red),
-            NotifLevel::Warn => ("[Warn]  ", Color::Yellow),
-            NotifLevel::Info => ("[Info]  ", GB_DARK),
-        };
-        status_lines.push(Line::from(vec![
-            Span::styled(prefix, Style::default().fg(color)),
-            Span::styled(notif.message.clone(), Style::default().fg(color)),
-        ]));
-    }
-
-    let status = Paragraph::new(status_lines).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Thick)
-            .border_style(Style::default().fg(GB_LIGHT))
-            .style(Style::default().bg(GB_DARKEST)),
-    );
-    f.render_widget(status, chunks[2]);
-
-    // Help bar
-    let help_pairs: &[(&str, &str)] = &[
-        ("[Q]", "uit"),
-        ("[E]", "at"),
-        ("[S]", "leep"),
-        ("[I]", "dle"),
-        ("[P]", "lay"),
-        ("[A]", "dd"),
-        ("[R]", "emove"),
-        ("[Tab]", "swap"),
-        ("[←→]", "select"),
-    ];
-    let mut help_spans: Vec<Span> = Vec::new();
-    for (i, (key, action)) in help_pairs.iter().enumerate() {
-        if i > 0 {
-            help_spans.push(Span::raw("  "));
-        }
-        help_spans.push(Span::styled(
-            *key,
-            Style::default()
-                .fg(GB_LIGHTEST)
-                .add_modifier(Modifier::BOLD),
-        ));
-        help_spans.push(Span::styled(*action, Style::default().fg(GB_DARK)));
-    }
-    let help = Paragraph::new(Line::from(help_spans)).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Thick)
-            .border_style(Style::default().fg(GB_LIGHT))
-            .style(Style::default().bg(GB_DARKEST)),
-    );
-    f.render_widget(help, chunks[3]);
-
-    // Prompt overlay — appears centered over the pen area when Add or Swap is active.
-    if app.prompt_mode != PromptMode::None {
-        let title = match app.prompt_mode {
-            PromptMode::Add => " Add Pokémon ",
-            PromptMode::Swap => " Swap to Pokémon ",
-            PromptMode::None => "",
-        };
-        // Small centered popup: 32 wide, 4 tall.
-        let popup_w = 32u16;
-        let popup_h = 4u16;
-        let popup_x = chunks[1].x + (chunks[1].width.saturating_sub(popup_w)) / 2;
-        let popup_y = chunks[1].y + (chunks[1].height.saturating_sub(popup_h)) / 2;
-        let popup_area = Rect::new(popup_x, popup_y, popup_w, popup_h);
-
-        // Clear background (overwrite pen content in this area).
-        f.render_widget(Clear, popup_area);
-
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(title)
-            .border_style(Style::default().fg(Color::Yellow))
-            .style(Style::default().bg(GB_DARKEST));
-        let inner = block.inner(popup_area);
-        f.render_widget(block, popup_area);
-
-        // Line 1: input field.
-        let input_text = format!("Pokédex #: {}█", app.prompt_buffer);
-        let row1 = Rect::new(inner.x, inner.y, inner.width, 1);
-        f.render_widget(
-            Paragraph::new(input_text).style(Style::default().fg(GB_LIGHTEST)),
-            row1,
-        );
-
-        // Line 2: hint.
-        let row2 = Rect::new(inner.x, inner.y + 1, inner.width, 1);
-        f.render_widget(
-            Paragraph::new("[Enter] confirm  [Esc] cancel")
-                .style(Style::default().fg(Color::DarkGray)),
-            row2,
-        );
-    }
+fn slot_rendered_width(slot: &CreatureSlot, fallback: u16) -> u16 {
+    pick_protocol_index(&slot.sprites.encoded, 0, 0, 0)
+        .and_then(|(si, di, fi)| slot.sprites.encoded[si][di][fi].as_ref())
+        .map(|p| p.area().width)
+        .unwrap_or(fallback)
 }
 
 /// Render all creatures in a single shared pen.
-pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker) {
+pub(super) fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker) {
     let count = app.slots.len();
     if count == 0 {
         return;
@@ -450,13 +144,9 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
 
         // First time this slot enters the pen: randomize position and velocity.
         if slot.sprites.encoded_rect.is_none() {
-            use rand::Rng;
             let mut rng = rand::thread_rng();
             let max_px = (pen_inner.width.saturating_sub(sprite_w)) as f32;
-            let max_py = (pen_inner
-                .height
-                .saturating_sub(crate::creature::sprite_stack_h(sprite_h)))
-                as f32;
+            let max_py = (pen_inner.height.saturating_sub(sprite_stack_h(sprite_h))) as f32;
             slot.pos_x = rng.gen_range(0.0..=max_px.max(0.0));
             // Staggered vertical start: divide pen height into count slots.
             // Each creature gets its own slot so they start spread out vertically.
@@ -508,14 +198,7 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
             slot.current_dir.as_index()
         };
 
-        let render_x = (pen_inner.x + slot.pos_x.round() as u16)
-            .min(pen_inner.x + pen_inner.width.saturating_sub(sprite_w));
-        let render_y = (pen_inner.y + slot.pos_y.round() as u16).min(
-            pen_inner.y
-                + pen_inner
-                    .height
-                    .saturating_sub(crate::creature::sprite_stack_h(sprite_h)),
-        );
+        let (render_x, render_y) = sprite_render_pos(slot, pen_inner, sprite_w, sprite_h);
         let mut img_area = Rect::new(render_x, render_y, sprite_w, sprite_h);
 
         let is_transition_slot = transition_slot_index == Some(i);
@@ -524,13 +207,11 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
         if is_transition_slot && let Some((_, recall_ticks, worker_done)) = transition_state {
             if recall_ticks > 0 {
                 state_idx = 3; // Recall (Spin/Rotate fallback)
-                let elapsed = crate::creature::RECALL_TICKS.saturating_sub(recall_ticks);
+                let elapsed = RECALL_TICKS.saturating_sub(recall_ticks);
                 frame_idx = elapsed as usize;
-                if elapsed >= crate::creature::RECALL_FLASH_SHRINK_DELAY_TICKS {
-                    let shrink_phase = elapsed - crate::creature::RECALL_FLASH_SHRINK_DELAY_TICKS;
-                    let shrink_total = (crate::creature::RECALL_TICKS
-                        - crate::creature::RECALL_FLASH_SHRINK_DELAY_TICKS)
-                        .max(1);
+                if elapsed >= RECALL_FLASH_SHRINK_DELAY_TICKS {
+                    let shrink_phase = elapsed - RECALL_FLASH_SHRINK_DELAY_TICKS;
+                    let shrink_total = (RECALL_TICKS - RECALL_FLASH_SHRINK_DELAY_TICKS).max(1);
                     let scale = 1.0 - (shrink_phase as f32 / shrink_total as f32);
                     let w = ((sprite_w as f32 * scale).round() as u16).clamp(2, sprite_w);
                     let h = ((sprite_h as f32 * scale).round() as u16).clamp(1, sprite_h);
@@ -570,7 +251,7 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
                 {
                     f.render_widget(Image::new(protocol), img_area);
                 } else {
-                    crate::creature::debug_log(format!(
+                    debug_log(format!(
                         "protocol_race_miss id={} state={} dir={} frame={}",
                         slot.creature_id, picked_state, picked_dir, picked_frame
                     ));
@@ -581,7 +262,7 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
                 }
             }
             None => {
-                crate::creature::debug_log(format!(
+                debug_log(format!(
                     "protocol_miss id={} state={} dir={} frame={} lens=[{}/{}/{}/{}]",
                     slot.creature_id,
                     state_idx,
@@ -604,14 +285,7 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
     for i in 0..count {
         let slot = &app.slots[i];
 
-        let render_x = (pen_inner.x + slot.pos_x.round() as u16)
-            .min(pen_inner.x + pen_inner.width.saturating_sub(sprite_w));
-        let render_y = (pen_inner.y + slot.pos_y.round() as u16).min(
-            pen_inner.y
-                + pen_inner
-                    .height
-                    .saturating_sub(crate::creature::sprite_stack_h(sprite_h)),
-        );
+        let (render_x, render_y) = sprite_render_pos(slot, pen_inner, sprite_w, sprite_h);
 
         let is_selected = selected == i;
 
@@ -651,10 +325,7 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
         // ratio (e.g. a square sprite in a 32×10 area only fills ~18 columns).
         // Halfblock always fills the full sprite_w. Use Protocol::area().width to
         // get the true rendered width rather than guessing from font metrics.
-        let actual_sprite_w = pick_protocol_index(&slot.sprites.encoded, 0, 0, 0)
-            .and_then(|(si, di, fi)| slot.sprites.encoded[si][di][fi].as_ref())
-            .map(|p| p.area().width)
-            .unwrap_or(sprite_w);
+        let actual_sprite_w = slot_rendered_width(slot, sprite_w);
         let label_x = render_x + (actual_sprite_w.saturating_sub(label_w) / 2);
         let label_y = render_y + sprite_h.saturating_sub(LABEL_OVERLAP);
 
@@ -689,22 +360,7 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
     }
 
     // ── Phase 3c: poke-doll sprite for Playing creatures ─────────────────────────
-    //
-    // The poke-doll image (bundled PNG, decoded at startup) is rendered as a
-    // real Protocol image — same pipeline as creature sprites. It is placed
-    // OUTSIDE the creature sprite, adjacent to the face-edge in the direction
-    // the creature is currently facing.
-    //
-    // The Protocol is encoded once per terminal size/type (lazy, same pattern as
-    // encode_all_frames) and stored in app.toy_proto.  Position-independence:
-    // we encode at (0,0) and render at the actual toy_area position, so the
-    // same protocol works for every Playing creature regardless of where it is.
-    //
-    // Toy width: half the sprite width.  Height: half the sprite height.
-    //
-    // Direction layout (current_dir): 0=Down  1=Left  2=Up  3=Right
-    // NOTE: for Left-facing sprites the face is on the RIGHT side of the image,
-    // so the toy goes RIGHT; Right-facing sprites have the face on the LEFT.
+    // Encoded once per terminal size; placed beside the creature in its facing direction.
 
     const TOY_W: u16 = SPRITE_W / 2; // 16 cols
     let toy_h = sprite_h / 2;
@@ -713,7 +369,7 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
     // Lazily encode (or re-encode on terminal resize / protocol-type change).
     if app.toy_proto_rect != Some(toy_size_rect) {
         let img = app.toy_image.clone();
-        app.toy_proto = crate::sprite_loading::encode_toy_image(&img, picker, toy_size_rect);
+        app.toy_proto = encode_toy_image(&img, picker, toy_size_rect);
         app.toy_proto_rect = Some(toy_size_rect);
     }
 
@@ -724,20 +380,10 @@ pub fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Pic
         }
 
         // Recompute render position (same formula as Phase 3a/3b).
-        let render_x = (pen_inner.x + slot.pos_x.round() as u16)
-            .min(pen_inner.x + pen_inner.width.saturating_sub(sprite_w));
-        let render_y = (pen_inner.y + slot.pos_y.round() as u16).min(
-            pen_inner.y
-                + pen_inner
-                    .height
-                    .saturating_sub(crate::creature::sprite_stack_h(sprite_h)),
-        );
+        let (render_x, render_y) = sprite_render_pos(slot, pen_inner, sprite_w, sprite_h);
 
         // Use the true rendered sprite width (same as nameplate logic).
-        let actual_sprite_w = pick_protocol_index(&slot.sprites.encoded, 0, 0, 0)
-            .and_then(|(si, di, fi)| slot.sprites.encoded[si][di][fi].as_ref())
-            .map(|p| p.area().width)
-            .unwrap_or(sprite_w);
+        let actual_sprite_w = slot_rendered_width(slot, sprite_w);
 
         let rx = render_x as i32;
         let ry = render_y as i32;
