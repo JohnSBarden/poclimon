@@ -11,7 +11,7 @@ use ratatui::{
     Frame,
     layout::Rect,
     style::{Color, Modifier, Style},
-    text::{Line, Span},
+    text::Span,
     widgets::{Block, BorderType, Borders, Paragraph},
 };
 use ratatui_image::{
@@ -52,7 +52,6 @@ pub(super) fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &
         .borders(Borders::ALL)
         .border_type(BorderType::Thick)
         .border_style(Style::default().fg(FENCE_BROWN))
-        .style(Style::default().bg(GB_DARKEST))
         .title(" 🌿 Pen ")
         .title_style(
             Style::default()
@@ -62,45 +61,32 @@ pub(super) fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &
     let pen_inner = block.inner(area);
     f.render_widget(block, area);
 
-    // ── Phase 0: Background + grass decorations ───────────────────────────────
-    // 0a. Solid background fill
-    f.render_widget(
-        Block::default().style(Style::default().bg(GB_DARKEST)),
-        pen_inner,
-    );
-
-    // 0b. Short grass tiles — deterministic per cell position
-    for row in 0..pen_inner.height {
-        let y = pen_inner.y + row;
-        let spans: Vec<Span> = (0..pen_inner.width)
-            .map(|col| {
-                let x = pen_inner.x + col;
-                let hash =
-                    (x as u32).wrapping_mul(2_654_435_761) ^ (y as u32).wrapping_mul(2_246_822_519);
-                match hash % 9 {
-                    0 => Span::styled("\"", Style::default().fg(GRASS_GREEN).bg(GB_DARKEST)),
-                    1 => Span::styled("'", Style::default().fg(GRASS_GREEN).bg(GB_DARKEST)),
-                    8 => Span::styled(
-                        "*",
-                        Style::default().fg(Color::Rgb(200, 200, 50)).bg(GB_DARKEST),
-                    ),
-                    _ => Span::styled(" ", Style::default().bg(GB_DARKEST)),
-                }
-            })
-            .collect();
-        f.render_widget(
-            Paragraph::new(Line::from(spans)),
-            Rect::new(pen_inner.x, y, pen_inner.width, 1),
-        );
+    // ── Phase 0: Sparse grass + fence posts ───────────────────────────────────
+    // Iterate every cell but only call render_widget on the ~7% that are tiles.
+    // This keeps render calls to O(tiles) rather than O(width × height) and lets
+    // the terminal's own background show through everywhere else.
+    for y in pen_inner.y..pen_inner.y + pen_inner.height {
+        for x in pen_inner.x..pen_inner.x + pen_inner.width {
+            let hash =
+                (x as u32).wrapping_mul(2_654_435_761) ^ (y as u32).wrapping_mul(2_246_822_519);
+            let (tile, color) = match hash % 45 {
+                0 => ("\"", GRASS_GREEN),
+                1 => ("'", GRASS_GREEN),
+                44 => ("*", Color::Rgb(200, 200, 50)),
+                _ => continue,
+            };
+            f.render_widget(
+                Paragraph::new(Span::styled(tile, Style::default().fg(color))),
+                Rect::new(x, y, 1, 1),
+            );
+        }
     }
 
-    // 0c. Fence posts along top and bottom inner edge rows, every 4 columns
+    // Fence posts every 4 cols on the top and bottom inner edge rows.
+    let fence_style = Style::default().fg(FENCE_BROWN);
     for col in (0..pen_inner.width).step_by(4) {
         f.render_widget(
-            Paragraph::new(Span::styled(
-                "┃",
-                Style::default().fg(FENCE_BROWN).bg(GB_DARKEST),
-            )),
+            Paragraph::new(Span::styled("┃", fence_style)),
             Rect::new(pen_inner.x + col, pen_inner.y, 1, 1),
         );
     }
@@ -108,10 +94,7 @@ pub(super) fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &
         let bottom_y = pen_inner.y + pen_inner.height - 1;
         for col in (0..pen_inner.width).step_by(4) {
             f.render_widget(
-                Paragraph::new(Span::styled(
-                    "┃",
-                    Style::default().fg(FENCE_BROWN).bg(GB_DARKEST),
-                )),
+                Paragraph::new(Span::styled("┃", fence_style)),
                 Rect::new(pen_inner.x + col, bottom_y, 1, 1),
             );
         }
