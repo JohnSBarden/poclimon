@@ -140,7 +140,7 @@ CI runs on `ubuntu-latest` only. Release builds produce Linux (musl), Windows, a
 
 **Open notes:**
 - `edition = "2024"` in Cargo.toml — verify this compiles on your Rust toolchain. Rust 2024 edition stabilized in Rust 1.85 (Feb 2025).
-- External `curl` call in `sprite/mod.rs` works but could be replaced with `reqwest` for better portability and explicit TLS control.
+- `reqwest` (blocking) is used for sprite downloads in `sprite/mod.rs`; no external `curl` binary required.
 - Background sprite loading spawns one thread per creature load (unbounded). Fine for current 6-creature max; consider a thread pool if that limit increases.
 
 ---
@@ -149,7 +149,7 @@ CI runs on `ubuntu-latest` only. Release builds produce Linux (musl), Windows, a
 
 1. **Verify Rust edition 2024 in CI** — ensure `ci.yml` pins a toolchain that ships 2024 edition (`>=1.85`).
 2. **Add SECURITY.md** — document how to report vulnerabilities (even for a hobby project, good practice).
-3. **Consider `reqwest` for sprite downloads** — replace `curl` subprocess with a pure-Rust HTTP client.
+3. ~~**`reqwest` for sprite downloads**~~ — done in v0.4.1; `curl` subprocess replaced.
 4. **crates.io publish** — package is configured for publishing; confirm `CARGO_REGISTRY_TOKEN` secret is current before next release.
 
 ---

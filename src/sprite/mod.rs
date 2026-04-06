@@ -49,35 +49,19 @@ fn download_file(url: &str, dest: &Path) -> Result<()> {
 
     // Write atomically to avoid leaving partial files on interruption.
     let tmp = dest.with_extension("part");
-    let connect_timeout = HTTP_CONNECT_TIMEOUT.as_secs().to_string();
-    let request_timeout = HTTP_REQUEST_TIMEOUT.as_secs().to_string();
-    let output = std::process::Command::new("curl")
-        .args([
-            "-fsSL",
-            "--connect-timeout",
-            &connect_timeout,
-            "--max-time",
-            &request_timeout,
-            "-o",
-        ])
-        .arg(tmp.as_os_str())
-        .arg(url)
-        .output()?;
-
-    if !output.status.success() {
-        let _ = std::fs::remove_file(&tmp);
-        anyhow::bail!(
-            "curl failed for {}: {}",
-            url,
-            String::from_utf8_lossy(&output.stderr)
-        );
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(HTTP_CONNECT_TIMEOUT)
+        .timeout(HTTP_REQUEST_TIMEOUT)
+        .build()?;
+    let response = client.get(url).send()?;
+    if !response.status().is_success() {
+        anyhow::bail!("HTTP {} for {}", response.status(), url);
     }
-
-    let metadata = std::fs::metadata(&tmp)?;
-    if metadata.len() < 50 {
-        let _ = std::fs::remove_file(&tmp);
+    let bytes = response.bytes()?;
+    if bytes.len() < 50 {
         anyhow::bail!("Downloaded file too small — likely a 404 or error");
     }
+    std::fs::write(&tmp, &bytes)?;
     std::fs::rename(&tmp, dest)?;
 
     Ok(())
