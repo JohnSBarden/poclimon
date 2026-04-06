@@ -133,15 +133,18 @@ CI runs on `ubuntu-latest` only. Release builds produce Linux (musl), Windows, a
 | Dependencies | Clean | All well-maintained; no known CVEs |
 | Input validation | Strong | Digit-only prompts, length-limited, database-validated creature IDs |
 | File paths | Safe | All PathBuf joins; no user input in path construction |
-| Network | Safe | `curl` called with hardcoded URLs and u32-derived IDs; no user input flows into URL |
+| Network | Safe | `reqwest` (blocking) with hardcoded URLs and u32-derived IDs; no user input flows into URL |
 | Secrets | Clean | No secrets in repo; GitHub Actions secrets used for release automation |
 | Unsafe code | None | Zero `unsafe` blocks |
 | Thread safety | Good | OnceLock + Mutex for shared state; mpsc channels for sprite loading |
 
 **Open notes:**
 - `edition = "2024"` in Cargo.toml — verify this compiles on your Rust toolchain. Rust 2024 edition stabilized in Rust 1.85 (Feb 2025).
-- `reqwest` (blocking) is used for sprite downloads in `sprite/mod.rs`; no external `curl` binary required.
+- `reqwest` (blocking) with `rustls-tls-webpki-roots` — pure-Rust TLS, no OpenSSL dependency, bundled Mozilla root CAs.
+- `image` and `ratatui-image` both use `default-features = false, features = ["png"]` — only PNG decoder compiled in, removing ~13 unused format decoders.
+- Sprite disk cache (`~/.config/poclimon/sprites/`) has no eviction or size cap. Each creature caches ≈5 PNGs + 1 XML; cache grows permanently but only for creatures actually loaded.
 - Background sprite loading spawns one thread per creature load (unbounded). Fine for current 6-creature max; consider a thread pool if that limit increases.
+- Release binary: ~6 MB (after feature trimming + LTO + strip). Memory at scale=3 with 6 creatures: up to ~35 MB raw frames (Arc-shared fallbacks reduce this in practice).
 
 ---
 

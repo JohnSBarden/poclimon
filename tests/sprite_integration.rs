@@ -5,18 +5,20 @@ use poclimon::anim_data;
 use poclimon::sprite_sheet;
 
 #[test]
-#[ignore = "requires network access and curl"]
+#[ignore = "requires network access"]
 fn test_pikachu_sprite_download_and_frame_extraction() {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .expect("client builds");
+
     // Download AnimData.xml for Pikachu (ID 25)
     let url =
         "https://raw.githubusercontent.com/PMDCollab/SpriteCollab/master/sprite/0025/AnimData.xml";
-    let output = std::process::Command::new("curl")
-        .args(["-sL", url])
-        .output()
-        .expect("curl should work");
-    assert!(output.status.success(), "AnimData download should succeed");
+    let resp = client.get(url).send().expect("AnimData request sent");
+    assert!(resp.status().is_success(), "AnimData download should succeed");
 
-    let xml = String::from_utf8(output.stdout).expect("valid UTF-8");
+    let xml = resp.text().expect("valid UTF-8");
     assert!(xml.contains("<AnimData>"), "Should be valid AnimData XML");
 
     let anims = anim_data::parse_anim_data(&xml);
@@ -39,13 +41,13 @@ fn test_pikachu_sprite_download_and_frame_extraction() {
     std::fs::create_dir_all(&tmp_dir).unwrap();
     let sheet_path = tmp_dir.join("pikachu_idle.png");
 
-    let dl = std::process::Command::new("curl")
-        .args(["-sL", "-o"])
-        .arg(sheet_path.as_os_str())
-        .arg(sheet_url)
-        .output()
-        .expect("curl should work");
-    assert!(dl.status.success(), "Sprite sheet download should succeed");
+    let bytes = client
+        .get(sheet_url)
+        .send()
+        .expect("sprite sheet request sent")
+        .bytes()
+        .expect("sprite sheet bytes");
+    std::fs::write(&sheet_path, &bytes).expect("write sprite sheet");
 
     let sheet = image::open(&sheet_path).expect("Should open sprite sheet PNG");
     let frames = sprite_sheet::extract_frames(&sheet, idle, 0);
