@@ -20,5 +20,4 @@ Cargo.lock
 .poclimon/
 
 # AI stuff
-CLAUDE.md
 .claude/
