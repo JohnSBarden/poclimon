@@ -1,7 +1,7 @@
 use crate::config::{GameConfig, MAX_ACTIVE_CREATURES};
 use crate::creature::CreatureSlot;
 use crate::notification::{MAX_NOTIFICATIONS, NotifLevel, Notification};
-use crate::sprite_loading::{AddTransition, SwapTransition, SwapWorkerResult};
+use crate::sprite_loading::{AddTransition, SpriteEncoder, SwapTransition, SwapWorkerResult};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::mpsc::{self};
@@ -52,6 +52,18 @@ pub struct App {
     pub save_path: Option<PathBuf>,
     /// Timestamp of the last periodic save (for throttling).
     last_save: Instant,
+    /// Encoder handed to loader threads so frames arrive ready to draw.
+    /// `None` only in tests / before the terminal is set up.
+    pub encoder: Option<SpriteEncoder>,
+    /// Raw escape sequences to write to the terminal ahead of the next frame's
+    /// diff (Kitty image uploads and deletes). Drained by the draw loop.
+    pub term_writes: Vec<String>,
+    /// Pending Kitty upload for the poke-doll toy (see `kitty_upload`).
+    pub toy_upload: Option<crate::kitty_upload::KittyUpload>,
+    /// Kitty image id of the currently encoded toy, for deletion on re-encode.
+    pub toy_kitty_id: Option<u32>,
+    /// Whether we're inside tmux (Kitty commands need passthrough wrapping).
+    pub is_tmux: bool,
 }
 
 impl App {
@@ -89,6 +101,11 @@ impl App {
             pen_dims: None,
             save_path,
             last_save: Instant::now(),
+            encoder: None,
+            term_writes: Vec::new(),
+            toy_upload: None,
+            toy_kitty_id: None,
+            is_tmux: false,
         }
     }
 
@@ -104,6 +121,28 @@ impl App {
         if let Err(e) = GameConfig::save(path, self.config.scale, &slot_refs) {
             let _ = e; // Can't notify from &self — ignore silently.
         }
+    }
+
+    /// Queue deletion of terminal-side Kitty images that are no longer used.
+    ///
+    /// Kitty and Ghostty keep uploaded images until explicitly deleted; left
+    /// alone they pile up across swaps/reloads until the terminal's storage
+    /// quota evicts images that are still on screen.
+    pub fn retire_kitty_images(&mut self, ids: &[u32]) {
+        let is_tmux = self.is_tmux;
+        self.term_writes.extend(
+            ids.iter()
+                .map(|&id| crate::kitty_upload::delete_command(id, is_tmux)),
+        );
+    }
+
+    /// Every Kitty image id this app has encoded that is still in use.
+    pub fn all_kitty_ids(&self) -> Vec<u32> {
+        self.slots
+            .iter()
+            .flat_map(|s| s.sprites.kitty_ids.iter().copied())
+            .chain(self.toy_kitty_id)
+            .collect()
     }
 
     /// Post a notification to the in-TUI message log.
@@ -141,12 +180,16 @@ impl App {
         for (idx, slot) in self.slots.iter().enumerate() {
             let id = slot.creature_id;
             let name = slot.creature_name.clone();
+            let encoder = self.encoder.clone();
             let (tx, rx) = mpsc::channel::<SwapWorkerResult>();
             std::thread::spawn(move || {
                 // Phase 1: load Idle only so the creature appears quickly.
                 let mut slot1 = CreatureSlot::new(id, name.clone());
                 match crate::sprite_loading::load_slot_idle_only(&mut slot1, scale) {
                     Ok(warnings) => {
+                        if let Some(enc) = &encoder {
+                            enc.encode(&mut slot1);
+                        }
                         let _ = tx.send(SwapWorkerResult::Loaded {
                             slot: Box::new(slot1),
                             warnings,
@@ -162,6 +205,9 @@ impl App {
                 let mut slot2 = CreatureSlot::new(id, name);
                 match crate::sprite_loading::load_slot_sprites(&mut slot2, scale) {
                     Ok(warnings) => {
+                        if let Some(enc) = &encoder {
+                            enc.encode(&mut slot2);
+                        }
                         let _ = tx.send(SwapWorkerResult::Loaded {
                             slot: Box::new(slot2),
                             warnings,
@@ -219,7 +265,9 @@ impl App {
                     slot.level = existing.level;
                     slot.xp = existing.xp;
                     slot.slot_id = existing.slot_id;
+                    let old_ids = std::mem::take(&mut self.slots[slot_index].sprites.kitty_ids);
                     self.slots[slot_index] = *slot;
+                    self.retire_kitty_images(&old_ids);
                     for w in warnings {
                         self.notify(NotifLevel::Warn, w);
                     }
@@ -370,7 +418,8 @@ impl App {
         if self.slots.len() <= 1 {
             return;
         }
-        self.slots.remove(self.selected);
+        let removed = self.slots.remove(self.selected);
+        self.retire_kitty_images(&removed.sprites.kitty_ids);
         // Keep `selected` in bounds.
         if self.selected >= self.slots.len() {
             self.selected = self.slots.len() - 1;
@@ -415,7 +464,9 @@ impl App {
 
         if let Some((slot_index, slot)) = apply_swap {
             if slot_index < self.slots.len() {
+                let old_ids = std::mem::take(&mut self.slots[slot_index].sprites.kitty_ids);
                 self.slots[slot_index] = slot;
+                self.retire_kitty_images(&old_ids);
             }
             self.swap_transition = None;
             self.save_roster();
@@ -494,14 +545,20 @@ impl App {
         let target_name = name.to_string();
         let worker_name = target_name.clone();
         let scale = self.config.scale;
+        let encoder = self.encoder.clone();
         let (tx, rx) = mpsc::channel::<SwapWorkerResult>();
         std::thread::spawn(move || {
             let mut slot = CreatureSlot::new(id, worker_name);
             let msg = match crate::sprite_loading::load_slot_sprites(&mut slot, scale) {
-                Ok(warnings) => SwapWorkerResult::Loaded {
-                    slot: Box::new(slot),
-                    warnings,
-                },
+                Ok(warnings) => {
+                    if let Some(enc) = &encoder {
+                        enc.encode(&mut slot);
+                    }
+                    SwapWorkerResult::Loaded {
+                        slot: Box::new(slot),
+                        warnings,
+                    }
+                }
                 Err(e) => SwapWorkerResult::Failed(e.to_string()),
             };
             let _ = tx.send(msg);
@@ -523,14 +580,20 @@ impl App {
         let target_name = name.to_string();
         let worker_name = target_name.clone();
         let scale = self.config.scale;
+        let encoder = self.encoder.clone();
         let (tx, rx) = mpsc::channel::<SwapWorkerResult>();
         std::thread::spawn(move || {
             let mut new_slot = CreatureSlot::new(id, worker_name);
             let msg = match crate::sprite_loading::load_slot_sprites(&mut new_slot, scale) {
-                Ok(warnings) => SwapWorkerResult::Loaded {
-                    slot: Box::new(new_slot),
-                    warnings,
-                },
+                Ok(warnings) => {
+                    if let Some(enc) = &encoder {
+                        enc.encode(&mut new_slot);
+                    }
+                    SwapWorkerResult::Loaded {
+                        slot: Box::new(new_slot),
+                        warnings,
+                    }
+                }
                 Err(e) => SwapWorkerResult::Failed(e.to_string()),
             };
             let _ = tx.send(msg);

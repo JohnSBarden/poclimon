@@ -1,4 +1,5 @@
 use crate::animation::Animator;
+use crate::kitty_upload::KittyUpload;
 use image::DynamicImage;
 use ratatui_image::protocol::Protocol;
 use std::io::Write;
@@ -61,6 +62,13 @@ pub struct SpriteCache {
     /// The size `Rect` (position 0,0) these protocols were encoded for.
     /// `None` means not yet encoded. Position-independent — re-encode only on resize.
     pub encoded_rect: Option<ratatui::layout::Rect>,
+    /// Kitty only: transmit sequences taken out of `encoded` (same indexing),
+    /// written to the terminal just before each frame is first displayed.
+    /// See `kitty_upload` for why this bypasses ratatui-image's own upload.
+    pub kitty_uploads: [[Vec<Option<KittyUpload>>; 4]; 5],
+    /// Kitty only: ids of images uploaded to the terminal for this slot, so
+    /// they can be deleted when the slot is replaced or released.
+    pub kitty_ids: Vec<u32>,
 }
 
 impl Default for SpriteCache {
@@ -79,6 +87,8 @@ impl SpriteCache {
             hop: std::array::from_fn(|_| Vec::new()),
             encoded: std::array::from_fn(|_| std::array::from_fn(|_| Vec::new())),
             encoded_rect: None,
+            kitty_uploads: std::array::from_fn(|_| std::array::from_fn(|_| Vec::new())),
+            kitty_ids: Vec::new(),
         }
     }
 }

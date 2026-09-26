@@ -3,22 +3,19 @@ use crate::animation::AnimationState;
 use crate::app::App;
 use crate::creature::{
     CreatureSlot, Direction, LABEL_H, LABEL_OVERLAP, RECALL_FLASH_SHRINK_DELAY_TICKS, RECALL_TICKS,
-    SPRITE_H, SPRITE_H_HALFBLOCKS, SPRITE_W, debug_log, sprite_stack_h,
+    SPRITE_W, debug_log, sprite_stack_h,
 };
-use crate::sprite_loading::{encode_all_frames, encode_toy_image};
+use crate::kitty_upload::{Placement, placement_at, take_upload};
+use crate::sprite_loading::{encode_all_frames, encode_toy_image, sprite_encode_rect};
 use rand::Rng;
 use ratatui::{
     Frame,
     layout::Rect,
     style::{Color, Modifier, Style},
     text::Span,
-    widgets::{Block, BorderType, Borders, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph},
 };
-use ratatui_image::{
-    Image,
-    picker::{Picker, ProtocolType},
-    protocol::Protocol,
-};
+use ratatui_image::{Image, picker::Picker, protocol::Protocol};
 
 fn sprite_render_pos(
     slot: &CreatureSlot,
@@ -36,15 +33,22 @@ fn sprite_render_pos(
 fn slot_rendered_width(slot: &CreatureSlot, fallback: u16) -> u16 {
     pick_protocol_index(&slot.sprites.encoded, 0, 0, 0)
         .and_then(|(si, di, fi)| slot.sprites.encoded[si][di][fi].as_ref())
-        .map(|p| p.area().width)
+        .map(|p| p.size().width)
         .unwrap_or(fallback)
 }
 
 /// Render all creatures in a single shared pen.
-pub(super) fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &mut Picker) {
+/// Returns the Kitty image placements drawn this frame; the caller runs
+/// `fix_orphan_placeholders` once everything (including popups) is drawn.
+pub(super) fn render_pen(
+    f: &mut Frame<'_>,
+    area: Rect,
+    app: &mut App,
+    picker: &mut Picker,
+) -> Vec<Placement> {
     let count = app.slots.len();
     if count == 0 {
-        return;
+        return Vec::new();
     }
 
     // Single outer border — no inner dividers.
@@ -109,19 +113,15 @@ pub(super) fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &
 
     // Sprite size: fixed width; height scales up for halfblock terminals so
     // creatures render at 32×32 "pixels" instead of 20×20.
-    let sprite_w = SPRITE_W;
-    let sprite_h = if picker.protocol_type() == ProtocolType::Halfblocks {
-        SPRITE_H_HALFBLOCKS
-    } else {
-        SPRITE_H
-    };
+    // Same size the loader threads encode at, so their frames are used as-is.
+    let size_rect = sprite_encode_rect(picker);
+    let sprite_w = size_rect.width;
+    let sprite_h = size_rect.height;
 
     // Publish pen dimensions so update_physics can use them next tick.
     app.pen_dims = Some((pen_inner.width, pen_inner.height, sprite_h));
 
-    // Size rect used for protocol encoding (position 0,0 — decoupled from render pos).
-    let size_rect = Rect::new(0, 0, sprite_w, sprite_h);
-
+    let mut retired: Vec<u32> = Vec::new();
     for i in 0..count {
         let slot = &mut app.slots[i];
 
@@ -159,10 +159,19 @@ pub(super) fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &
 
         // Lazily encode (or re-encode on resize) — compare size only, not position.
         // Physics updates have been moved to App::update_physics (called each tick).
+        // Normally already encoded by the loader thread; this is the fallback
+        // for placeholder slots and protocol changes.
         if slot.sprites.encoded_rect != Some(size_rect) {
+            retired.append(&mut slot.sprites.kitty_ids);
             encode_all_frames(slot, picker, size_rect);
         }
     }
+    app.retire_kitty_images(&retired);
+
+    // Kitty uploads due this frame; written to the terminal before the diff.
+    let mut uploads: Vec<String> = Vec::new();
+    // Kitty image placements this frame, for the orphaned-placeholder fixup.
+    let mut placements: Vec<Placement> = Vec::new();
 
     // ── Phase 3a: render all sprites ──────────────────────────────────────────────
     for i in 0..count {
@@ -211,6 +220,7 @@ pub(super) fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &
         }
 
         if render_waiting_ball {
+            f.render_widget(Clear, img_area);
             f.render_widget(
                 Paragraph::new("⚪").style(Style::default().fg(Color::LightRed)),
                 Rect::new(
@@ -225,21 +235,31 @@ pub(super) fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &
 
         if white_flash {
             let flash = Block::default().style(Style::default().bg(Color::White));
+            f.render_widget(Clear, img_area);
             f.render_widget(flash, img_area);
             continue;
         }
 
         match pick_protocol_index(&slot.sprites.encoded, state_idx, dir_idx, frame_idx) {
             Some((picked_state, picked_dir, picked_frame)) => {
+                if let Some(up) = slot.sprites.kitty_uploads[picked_state][picked_dir]
+                    .get_mut(picked_frame)
+                    .and_then(Option::take)
+                {
+                    slot.sprites.kitty_ids.push(up.id);
+                    uploads.push(up.seq);
+                }
                 if let Some(protocol) =
                     slot.sprites.encoded[picked_state][picked_dir][picked_frame].as_mut()
                 {
                     f.render_widget(Image::new(protocol), img_area);
+                    placements.extend(placement_at(f.buffer_mut(), img_area, protocol));
                 } else {
                     debug_log(format!(
                         "protocol_race_miss id={} state={} dir={} frame={}",
                         slot.creature_id, picked_state, picked_dir, picked_frame
                     ));
+                    f.render_widget(Clear, img_area);
                     f.render_widget(
                         Paragraph::new("Loading…").style(Style::default().fg(Color::DarkGray)),
                         img_area,
@@ -258,6 +278,7 @@ pub(super) fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &
                     slot.sprites.encoded[state_idx][2].len(),
                     slot.sprites.encoded[state_idx][3].len()
                 ));
+                f.render_widget(Clear, img_area);
                 f.render_widget(
                     Paragraph::new("Loading…").style(Style::default().fg(Color::DarkGray)),
                     img_area,
@@ -321,6 +342,10 @@ pub(super) fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &
                 .border_style(Style::default().fg(if is_selected { GB_LIGHTEST } else { GB_DARK }))
                 .style(Style::default().bg(GB_DARKEST));
             let inner = block.inner(label_area);
+            // Clear first: a styled Block only restyles cells, so sprite cells
+            // underneath (Kitty placeholders, halfblocks) would survive with the
+            // nameplate's colours and show as image garbage inside the label.
+            f.render_widget(Clear, label_area);
             f.render_widget(block, label_area);
 
             let row1 = Rect::new(inner.x, inner.y, inner.width, 1);
@@ -354,6 +379,10 @@ pub(super) fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &
         let img = app.toy_image.clone();
         app.toy_proto = encode_toy_image(&img, picker, toy_size_rect);
         app.toy_proto_rect = Some(toy_size_rect);
+        if let Some(old) = app.toy_kitty_id.take() {
+            app.retire_kitty_images(&[old]);
+        }
+        app.toy_upload = app.toy_proto.as_ref().and_then(take_upload);
     }
 
     for i in 0..count {
@@ -379,24 +408,32 @@ pub(super) fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &
         // caused by transparent padding around the PMDCollab sprite art. Without
         // it the toy renders at the bounding-box edge, far from the visible art.
         const INSET: i32 = 4;
-        let term_w = f.area().width as i32;
-        let term_h = f.area().height as i32;
+        // Keep the toy inside the pen so it never draws over the fence/border.
+        let pen_x0 = pen_inner.x as i32;
+        let pen_y0 = pen_inner.y as i32;
+        let pen_x1 = pen_x0 + pen_inner.width as i32;
+        let pen_y1 = pen_y0 + pen_inner.height as i32;
         let toy_mid_y = ry + sh / 2 - th / 2;
         let toy_x_ideal = if slot.vel_x >= 0.0 {
             rx + sw - INSET
         } else {
             rx - tw + INSET
         };
-        let toy_x = toy_x_ideal.clamp(0, term_w - tw);
-        let toy_y = toy_mid_y.clamp(0, term_h - th);
+        let toy_x = toy_x_ideal.clamp(pen_x0, (pen_x1 - tw).max(pen_x0));
+        let toy_y = toy_mid_y.clamp(pen_y0, (pen_y1 - th).max(pen_y0));
 
+        if let Some(up) = app.toy_upload.take() {
+            app.toy_kitty_id = Some(up.id);
+            uploads.push(up.seq);
+        }
         if let Some(proto) = app.toy_proto.as_mut() {
-            f.render_widget(
-                Image::new(proto),
-                Rect::new(toy_x as u16, toy_y as u16, TOY_W, toy_h),
-            );
+            let toy_area = Rect::new(toy_x as u16, toy_y as u16, TOY_W, toy_h);
+            f.render_widget(Image::new(proto), toy_area);
+            placements.extend(placement_at(f.buffer_mut(), toy_area, proto));
         }
     }
+    app.term_writes.extend(uploads);
+    placements
 }
 
 /// Pick a renderable protocol frame with fallbacks:

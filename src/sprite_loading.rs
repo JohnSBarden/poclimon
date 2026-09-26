@@ -730,7 +730,7 @@ pub fn encode_all_frames(slot: &mut CreatureSlot, picker: &Picker, area: ratatui
                         picker
                             .new_protocol(
                                 img.as_ref().clone(),
-                                area,
+                                area.as_size(),
                                 Resize::Scale(Some(FilterType::Nearest)),
                             )
                             .ok()
@@ -740,6 +740,53 @@ pub fn encode_all_frames(slot: &mut CreatureSlot, picker: &Picker, area: ratatui
         })
     });
     slot.sprites.encoded_rect = Some(area);
+
+    // Kitty: pull every transmit sequence out now (off the render path) so
+    // uploads can be written reliably, just ahead of first display.
+    // `kitty_ids` records images as they are actually uploaded (see render_pen).
+    slot.sprites.kitty_ids.clear();
+    slot.sprites.kitty_uploads = std::array::from_fn(|s| {
+        std::array::from_fn(|d| {
+            slot.sprites.encoded[s][d]
+                .iter()
+                .map(|p| p.as_ref().and_then(crate::kitty_upload::take_upload))
+                .collect()
+        })
+    });
+}
+
+/// Everything a background thread needs to encode sprite frames for display.
+#[derive(Clone)]
+pub struct SpriteEncoder {
+    pub picker: Picker,
+    pub rect: ratatui::layout::Rect,
+}
+
+impl SpriteEncoder {
+    pub fn new(picker: &Picker) -> Self {
+        Self {
+            picker: picker.clone(),
+            rect: sprite_encode_rect(picker),
+        }
+    }
+
+    /// Encode every frame of `slot` for the terminal. Runs on loader threads so
+    /// the render loop never stalls on encoding.
+    pub fn encode(&self, slot: &mut CreatureSlot) {
+        encode_all_frames(slot, &self.picker, self.rect);
+    }
+}
+
+/// The cell size every creature frame is encoded at. Depends only on the
+/// protocol, not on the terminal or pen size, so it can be computed up front
+/// and encoding can happen on background threads.
+pub fn sprite_encode_rect(picker: &Picker) -> ratatui::layout::Rect {
+    let h = if picker.protocol_type() == ratatui_image::picker::ProtocolType::Halfblocks {
+        crate::creature::SPRITE_H_HALFBLOCKS
+    } else {
+        crate::creature::SPRITE_H
+    };
+    ratatui::layout::Rect::new(0, 0, crate::creature::SPRITE_W, h)
 }
 
 /// Encode an arbitrary-sized image (e.g. the poke-doll sprite) into a
@@ -764,12 +811,16 @@ pub fn encode_toy_image(
         let oy = ph.saturating_sub(scaled.height()) / 2;
         let mut canvas = image::DynamicImage::ImageRgba8(image::RgbaImage::new(pw, ph));
         image::imageops::overlay(&mut canvas, &scaled, ox as i64, oy as i64);
-        ratatui_image::protocol::halfblocks::Halfblocks::new(canvas, area)
+        ratatui_image::protocol::halfblocks::Halfblocks::new(canvas, area.as_size())
             .ok()
             .map(Protocol::Halfblocks)
     } else {
         picker
-            .new_protocol(img.clone(), area, Resize::Scale(Some(FilterType::Lanczos3)))
+            .new_protocol(
+                img.clone(),
+                area.as_size(),
+                Resize::Scale(Some(FilterType::Lanczos3)),
+            )
             .ok()
     }
 }
@@ -796,7 +847,7 @@ pub fn encode_halfblock_frame(
     let oy = ph.saturating_sub(resized.height()) / 2;
     let mut canvas = image::DynamicImage::ImageRgba8(image::RgbaImage::new(pw, ph));
     image::imageops::overlay(&mut canvas, &resized, ox as i64, oy as i64);
-    ratatui_image::protocol::halfblocks::Halfblocks::new(canvas, area)
+    ratatui_image::protocol::halfblocks::Halfblocks::new(canvas, area.as_size())
         .ok()
         .map(Protocol::Halfblocks)
 }
