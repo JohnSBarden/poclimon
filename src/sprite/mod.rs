@@ -9,6 +9,7 @@ pub mod fallback;
 use crate::creatures;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
 
@@ -17,6 +18,22 @@ const SPRITECOLLAB_BASE: &str =
     "https://raw.githubusercontent.com/PMDCollab/SpriteCollab/master/sprite";
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+/// Upper bound on a single download. The largest sprite sheets are well under 1 MB.
+const MAX_DOWNLOAD_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Shared HTTP agent so concurrent downloads reuse one connection pool
+/// instead of building a fresh client (and TLS config) per file.
+/// Non-2xx responses surface as errors from `call()`.
+fn http_agent() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::Agent::config_builder()
+            .timeout_connect(Some(HTTP_CONNECT_TIMEOUT))
+            .timeout_global(Some(HTTP_REQUEST_TIMEOUT))
+            .build()
+            .into()
+    })
+}
 
 /// All animations loaded during the full (Phase 2) background load.
 const ALL_ANIMS: &[&str] = &["Idle", "Eat", "Sleep", "Spin", "Rotate"];
@@ -49,35 +66,16 @@ fn download_file(url: &str, dest: &Path) -> Result<()> {
 
     // Write atomically to avoid leaving partial files on interruption.
     let tmp = dest.with_extension("part");
-    let connect_timeout = HTTP_CONNECT_TIMEOUT.as_secs().to_string();
-    let request_timeout = HTTP_REQUEST_TIMEOUT.as_secs().to_string();
-    let output = std::process::Command::new("curl")
-        .args([
-            "-fsSL",
-            "--connect-timeout",
-            &connect_timeout,
-            "--max-time",
-            &request_timeout,
-            "-o",
-        ])
-        .arg(tmp.as_os_str())
-        .arg(url)
-        .output()?;
-
-    if !output.status.success() {
-        let _ = std::fs::remove_file(&tmp);
-        anyhow::bail!(
-            "curl failed for {}: {}",
-            url,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    let metadata = std::fs::metadata(&tmp)?;
-    if metadata.len() < 50 {
-        let _ = std::fs::remove_file(&tmp);
+    let mut response = http_agent().get(url).call()?;
+    let bytes = response
+        .body_mut()
+        .with_config()
+        .limit(MAX_DOWNLOAD_BYTES)
+        .read_to_vec()?;
+    if bytes.len() < 50 {
         anyhow::bail!("Downloaded file too small — likely a 404 or error");
     }
+    std::fs::write(&tmp, &bytes)?;
     std::fs::rename(&tmp, dest)?;
 
     Ok(())

@@ -16,9 +16,11 @@ poclimon
 
 - Animated sprite art in your terminal — Kitty, Sixel, iTerm2, and halfblock for the rest
 - Up to 6 creatures sharing one open pen with elastic collision physics
-- Feed, sleep, and idle animations
+- Feed, sleep, play, and idle animations
+- XP and leveling — creatures gain XP as you interact with them; level persists across sessions
 - Add, remove, and swap creatures live with no restart and no config editing
-- Full Gen 1–9 Pokédex: any creature by name or National Dex ID, 898+ entries
+- Roster persistence — creature state (XP, level) saved back to config on quit
+- Full Gen 1–9 Pokédex: any of 1025 creatures by National Dex ID
 - Sprites cached to `~/.config/poclimon/sprites/` — downloaded once, Bill's PC keeps the rest
 - TOML config
 
@@ -67,20 +69,34 @@ poclimon --config ./my-roster.toml # custom config
 
 `~/.config/poclimon.toml` is conjured on first run. You can bypass it with `--creature` or `--config`.
 
+As of v0.4.0, the config stores per-creature state so XP and level survive restarts:
+
 ```toml
 [display]
 scale = 3  # sprite scale multiplier — memory scales quadratically, 3 is the sweet spot
 
-[roster]
-# Names or National Dex IDs, max 6. "Gotta display 6" isn't the tagline, but it could be.
-creatures = ["pikachu", "eevee", "bulbasaur"]
+[[slot]]
+id = 25
+slot_id = 8675309
+name = "Pikachu"
+level = 3
+xp = 42
+
+[[slot]]
+id = 133
+slot_id = 8675310
+name = "Eevee"
+level = 1
+xp = 0
 ```
+
+The old `[roster]` format is still accepted and auto-migrated on first run.
 
 ---
 
 ## Starter Roster
 
-11 creatures ship ready-to-go. Hit `A` to add them live, or summon anything from the 898-strong Pokédex by Dex ID.
+11 creatures ship ready-to-go. Hit `A` to add them live, or summon anything from the 1025-strong Pokédex by Dex ID.
 
 | Name       | ID  |
 | ---------- | --- |

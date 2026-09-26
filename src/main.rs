@@ -137,10 +137,8 @@ fn run_app(
                     KeyCode::Backspace => {
                         app.prompt_buffer.pop();
                     }
-                    KeyCode::Char(c) if c.is_ascii_digit() => {
-                        if app.prompt_buffer.len() < 4 {
-                            app.prompt_buffer.push(c);
-                        }
+                    KeyCode::Char(c) if c.is_ascii_digit() && app.prompt_buffer.len() < 4 => {
+                        app.prompt_buffer.push(c);
                     }
                     _ => {}
                 },
