@@ -7,18 +7,20 @@ use poclimon::sprite_sheet;
 #[test]
 #[ignore = "requires network access"]
 fn test_pikachu_sprite_download_and_frame_extraction() {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(20))
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(20)))
         .build()
-        .expect("client builds");
+        .into();
 
     // Download AnimData.xml for Pikachu (ID 25)
     let url =
         "https://raw.githubusercontent.com/PMDCollab/SpriteCollab/master/sprite/0025/AnimData.xml";
-    let resp = client.get(url).send().expect("AnimData request sent");
-    assert!(resp.status().is_success(), "AnimData download should succeed");
-
-    let xml = resp.text().expect("valid UTF-8");
+    // ureq returns Err for non-2xx statuses, so a successful call means 2xx.
+    let mut resp = agent
+        .get(url)
+        .call()
+        .expect("AnimData download should succeed");
+    let xml = resp.body_mut().read_to_string().expect("valid UTF-8");
     assert!(xml.contains("<AnimData>"), "Should be valid AnimData XML");
 
     let anims = anim_data::parse_anim_data(&xml);
@@ -41,11 +43,12 @@ fn test_pikachu_sprite_download_and_frame_extraction() {
     std::fs::create_dir_all(&tmp_dir).unwrap();
     let sheet_path = tmp_dir.join("pikachu_idle.png");
 
-    let bytes = client
+    let bytes = agent
         .get(sheet_url)
-        .send()
+        .call()
         .expect("sprite sheet request sent")
-        .bytes()
+        .body_mut()
+        .read_to_vec()
         .expect("sprite sheet bytes");
     std::fs::write(&sheet_path, &bytes).expect("write sprite sheet");
 

@@ -18,20 +18,22 @@ This file gives Claude Code (and human contributors) the context needed to work 
 
 ```
 src/
-  main.rs          — CLI entry (clap), event loop bootstrap, interactive prompts
-  app.rs           — App state, background sprite loading, tick/render loop
-  config/
-    mod.rs         — TOML config loading, validation, roster management
-  creatures/
-    mod.rs         — Pokédex database (898+ entries), padded ID helpers
-  creature.rs      — Per-creature state machine (idle/eat/sleep/play), XP/level logic
-  animation.rs     — Frame-based animation player
-  sprite/
-    mod.rs         — Sprite cache, curl-based downloader, protocol detection
-  physics.rs       — Elastic collision physics for multi-creature pen
-  ui.rs            — Ratatui layout and rendering
-  splash.rs        — Startup splash screen
-build.rs           — Compile-time sprite embedding for the 11 starters
+  main.rs          — CLI entry, event loop, key handling and Pokédex-number prompt
+  cli.rs           — clap argument definitions
+  lib.rs           — library root (exposes modules to integration tests)
+  app.rs           — App state, background sprite loading, pen physics/collision tick
+  config/mod.rs    — TOML config loading, validation, roster + XP persistence
+  creatures.rs     — Pokédex table (1025 entries) and padded-ID helpers
+  creature.rs      — Per-creature state machine (idle/eat/sleep/play), XP/level, movement
+  animation.rs     — Timing-only frame animation player
+  anim_data.rs     — PMDCollab AnimData.xml parser
+  sprite_sheet.rs  — Sprite sheet frame extraction and normalization
+  sprite_loading.rs— Loads/scales animations into per-direction frame sets
+  sprite/mod.rs    — Sprite disk cache + HTTPS downloader (ureq, shared agent)
+  sprite/fallback.rs — Generated fallback sprites when downloads fail
+  notification.rs  — In-TUI notification messages
+  ui.rs            — Ratatui layout, pen rendering, splash screen
+build.rs           — Pre-renders the title art from assets/poclimon-title.png at compile time
 ```
 
 **Data flow:**
@@ -133,18 +135,18 @@ CI runs on `ubuntu-latest` only. Release builds produce Linux (musl), Windows, a
 | Dependencies | Clean | All well-maintained; no known CVEs |
 | Input validation | Strong | Digit-only prompts, length-limited, database-validated creature IDs |
 | File paths | Safe | All PathBuf joins; no user input in path construction |
-| Network | Safe | `reqwest` (blocking) with hardcoded URLs and u32-derived IDs; no user input flows into URL |
+| Network | Safe | `ureq` with hardcoded URLs and u32-derived IDs; no user input flows into URL; 16 MB per-download cap |
 | Secrets | Clean | No secrets in repo; GitHub Actions secrets used for release automation |
 | Unsafe code | None | Zero `unsafe` blocks |
 | Thread safety | Good | OnceLock + Mutex for shared state; mpsc channels for sprite loading |
 
 **Open notes:**
 - `edition = "2024"` in Cargo.toml — verify this compiles on your Rust toolchain. Rust 2024 edition stabilized in Rust 1.85 (Feb 2025).
-- `reqwest` (blocking) with `rustls-tls-webpki-roots` — pure-Rust TLS, no OpenSSL dependency, bundled Mozilla root CAs.
+- `ureq` 3 with the `rustls` feature — small synchronous client (no tokio/hyper), pure-Rust TLS, bundled Mozilla root CAs via webpki-roots. Chosen over `reqwest::blocking`, which added ~1.2 MB to the binary.
 - `image` and `ratatui-image` both use `default-features = false, features = ["png"]` — only PNG decoder compiled in, removing ~13 unused format decoders.
 - Sprite disk cache (`~/.config/poclimon/sprites/`) has no eviction or size cap. Each creature caches ≈5 PNGs + 1 XML; cache grows permanently but only for creatures actually loaded.
 - Background sprite loading spawns one thread per creature load (unbounded). Fine for current 6-creature max; consider a thread pool if that limit increases.
-- Release binary: ~6 MB (after feature trimming + LTO + strip). Memory at scale=3 with 6 creatures: up to ~35 MB raw frames (Arc-shared fallbacks reduce this in practice).
+- Release binary: ~5.2 MB on x86_64 Linux (PNG-only `image`, ureq, thin LTO + strip). Memory at scale=3 with 6 creatures: up to ~35 MB raw frames (Arc-shared fallbacks reduce this in practice).
 
 ---
 
@@ -152,7 +154,7 @@ CI runs on `ubuntu-latest` only. Release builds produce Linux (musl), Windows, a
 
 1. **Verify Rust edition 2024 in CI** — ensure `ci.yml` pins a toolchain that ships 2024 edition (`>=1.85`).
 2. **Add SECURITY.md** — document how to report vulnerabilities (even for a hobby project, good practice).
-3. ~~**`reqwest` for sprite downloads**~~ — done in v0.4.1; `curl` subprocess replaced.
+3. ~~**In-process HTTP for sprite downloads**~~ — done; `curl` subprocess replaced with `ureq`.
 4. **crates.io publish** — package is configured for publishing; confirm `CARGO_REGISTRY_TOKEN` secret is current before next release.
 
 ---

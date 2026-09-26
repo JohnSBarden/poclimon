@@ -20,7 +20,7 @@ poclimon
 - XP and leveling — creatures gain XP as you interact with them; level persists across sessions
 - Add, remove, and swap creatures live with no restart and no config editing
 - Roster persistence — creature state (XP, level) saved back to config on quit
-- Full Gen 1–9 Pokédex: any creature by name or National Dex ID, 898+ entries
+- Full Gen 1–9 Pokédex: any of 1025 creatures by National Dex ID
 - Sprites cached to `~/.config/poclimon/sprites/` — downloaded once, Bill's PC keeps the rest
 - TOML config
 
@@ -96,7 +96,7 @@ The old `[roster]` format is still accepted and auto-migrated on first run.
 
 ## Starter Roster
 
-11 creatures ship ready-to-go. Hit `A` to add them live, or summon anything from the 898-strong Pokédex by Dex ID.
+11 creatures ship ready-to-go. Hit `A` to add them live, or summon anything from the 1025-strong Pokédex by Dex ID.
 
 | Name       | ID  |
 | ---------- | --- |
