@@ -284,11 +284,9 @@ pub(super) fn render_pen(f: &mut Frame<'_>, area: Rect, app: &mut App, picker: &
         // just the level when Idle (no XP accrues while Idle).
         let level_display = {
             let threshold = 50 * slot.level;
-            let filled = if threshold > 0 {
-                (slot.xp * 8 / threshold).min(8) as usize
-            } else {
-                0
-            };
+            let filled = (slot.xp * 8)
+                .checked_div(threshold)
+                .map_or(0, |f| f.min(8) as usize);
             let bar: String = "▓".repeat(filled) + &"░".repeat(8 - filled);
             match slot.animator.state() {
                 AnimationState::Idle => format!("Lv.{}", slot.level),
