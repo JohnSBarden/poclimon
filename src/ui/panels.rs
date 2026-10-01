@@ -84,7 +84,7 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
         .unwrap_or(Color::White);
 
     // Shared pen — all creatures on one open canvas.
-    render_pen(f, chunks[1], app, picker);
+    let placements = render_pen(f, chunks[1], app, picker);
 
     // Status + notification panel.
     // Line 0: current creature state.
@@ -230,4 +230,8 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
             row2,
         );
     }
+
+    // Last: anything drawn over sprites (nameplates, toy, popup) may have
+    // split Kitty image rows; restore explicit positions on the split cells.
+    crate::kitty_upload::fix_orphan_placeholders(f.buffer_mut(), &placements);
 }

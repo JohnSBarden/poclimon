@@ -8,7 +8,7 @@ This file gives Claude Code (and human contributors) the context needed to work 
 
 **poclimon** is a Rust TUI idle pet game. Pokémon live in your terminal — they eat, sleep, play, and accumulate XP. Built on [Ratatui](https://ratatui.rs/) and [ratatui-image](https://github.com/benjajaja/ratatui-image), it renders sprites via Kitty graphics, Sixel, iTerm2 inline, or Unicode halfblocks depending on what the terminal supports.
 
-- **Version:** 0.4.1
+- **Version:** see `Cargo.toml` (bumped automatically by the release workflow)
 - **Edition:** Rust 2024 (requires nightly or recent stable that ships 2024 edition support)
 - **Binary:** `poclimon` (single binary, no server, no daemon)
 
@@ -32,7 +32,14 @@ src/
   sprite/mod.rs    — Sprite disk cache + HTTPS downloader (ureq, shared agent)
   sprite/fallback.rs — Generated fallback sprites when downloads fail
   notification.rs  — In-TUI notification messages
-  ui.rs            — Ratatui layout, pen rendering, splash screen
+  kitty_upload.rs  — Out-of-band Kitty image uploads/deletes + placeholder fixup (see Rendering rules)
+  devtools.rs      — POCLIMON_FRAME_DUMP instrumentation used by tools/term-harness
+  ui/
+    panels.rs      — Layout, title/status/help panels, prompt popup; runs the Kitty fixup last
+    pen.rs         — Pen, sprites, nameplates, toy
+    splash.rs      — Startup splash screen
+    theme.rs       — Game Boy DMG palette
+tools/term-harness/ — Headless terminal harness: records sessions per protocol, checks rendering
 build.rs           — Pre-renders the title art from assets/poclimon-title.png at compile time
 ```
 
@@ -41,6 +48,49 @@ build.rs           — Pre-renders the title art from assets/poclimon-title.png 
 2. Creatures initialized from config slots; sprites loaded in background threads via `mpsc` channel
 3. Main loop: crossterm events → state updates → ratatui render
 4. On quit, creature state (XP, level, slot_id) persisted back to TOML config
+
+---
+
+## Rendering rules (read before touching ui/ or sprite encoding)
+
+These are the invariants behind the 2026-09 rendering fixes. Breaking one
+brings back a visible bug.
+
+1. **Stay on ratatui ≥ 0.30 / ratatui-image ≥ 11.** Older ratatui-image
+   stored a whole image escape sequence in one cell; ratatui 0.29 measured
+   that cell as thousands of columns wide and re-sent every image after it
+   on every frame (≈120 full image re-sends/s on iTerm2/Sixel), and old
+   Kitty rows overwrote cells ratatui thought held other content. 0.30's
+   `CellDiffOption::ForcedWidth` fixes the width problem.
+2. **Kitty uploads go out-of-band.** ratatui-image attaches an image's
+   upload to its first cell the first time it renders, and marks it sent. If
+   anything later in the frame covers that cell the upload is lost forever
+   (blank animation frames). `SpriteEncoder` takes the uploads out at encode
+   time (`kitty_upload::take_upload`); `render_pen` queues each one just
+   before its frame is first shown, and `draw_frame` writes them ahead of
+   the diff.
+3. **Delete Kitty images you drop.** Replacing/removing a slot queues
+   `a=d,d=I` deletes for its uploaded ids. Terminals keep images until
+   deleted and evict in-use ones once their quota fills.
+4. **Clear before overlaying sprites.** A styled `Block` only restyles
+   cells; draw `Clear` first (nameplates, flash, popups), or sprite cells
+   survive underneath in the overlay's colours.
+5. **Run `fix_orphan_placeholders` after everything is drawn.** Kitty infers
+   a placeholder's column from its left neighbour; anything drawn across an
+   image row breaks that. `ui()` calls it last.
+6. **Never encode on the render thread.** Frames are encoded by the loader
+   threads (`SpriteEncoder`); `render_pen` only re-encodes as a fallback.
+   Encoding all frames of six creatures took 1–4 s and froze the UI.
+7. **Fixed tick.** `run_app` advances the game once per 50 ms tick; input
+   only triggers a redraw. (Ticking per loop iteration made creatures speed
+   up while keys were pressed.)
+8. Frames are written through a 64 KiB `BufWriter` inside a synchronized
+   update (DEC 2026) so terminals present whole frames.
+
+**Known limitation:** ratatui-image's startup capability query reads stdin
+on a helper thread. If a terminal never answers the query, that thread
+lingers and swallows the first keypress. Real terminals, SSH and tmux all
+answer; only affects unusual setups.
 
 ---
 
@@ -104,6 +154,13 @@ cargo test
 
 # Debug logging (writes to a file)
 POCLIMON_DEBUG_LOG=/tmp/poclimon.log cargo run
+
+# Force a graphics protocol (kitty | sixel | iterm2 | halfblocks)
+POCLIMON_PROTOCOL=kitty cargo run
+
+# Rendering regression check (see tools/term-harness/README.md)
+cd tools/term-harness && python3 run.py ../../target/release/poclimon kitty out/kitty.bin \
+  && python3 stale.py out/kitty.bin && python3 kitty_check.py out/kitty.bin
 ```
 
 ---
@@ -146,7 +203,7 @@ CI runs on `ubuntu-latest` only. Release builds produce Linux (musl), Windows, a
 - `image` and `ratatui-image` both use `default-features = false, features = ["png"]` — only PNG decoder compiled in, removing ~13 unused format decoders.
 - Sprite disk cache (`~/.config/poclimon/sprites/`) has no eviction or size cap. Each creature caches ≈5 PNGs + 1 XML; cache grows permanently but only for creatures actually loaded.
 - Background sprite loading spawns one thread per creature load (unbounded). Fine for current 6-creature max; consider a thread pool if that limit increases.
-- Release binary: ~5.2 MB on x86_64 Linux (PNG-only `image`, ureq, thin LTO + strip). Memory at scale=3 with 6 creatures: up to ~35 MB raw frames (Arc-shared fallbacks reduce this in practice).
+- Release binary: ~5.0 MB on x86_64 Linux (PNG-only `image`, ureq, thin LTO + strip). Memory at scale=3 with 6 creatures: up to ~35 MB raw frames (Arc-shared fallbacks reduce this in practice).
 
 ---
 
