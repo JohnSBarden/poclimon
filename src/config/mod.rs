@@ -7,6 +7,11 @@ use thiserror::Error;
 
 pub const MAX_ACTIVE_CREATURES: usize = 6;
 
+/// Bounds for `[display] scale`. 0 would produce zero-sized frames, and frame
+/// memory grows with the square of the scale, so out-of-range values are clamped.
+pub const MIN_SCALE: u32 = 1;
+pub const MAX_SCALE: u32 = 8;
+
 #[derive(Error, Debug)]
 pub enum ConfigError {
     #[error("Failed to read config file: {0}")]
@@ -113,35 +118,35 @@ impl Default for GameConfig {
                 RosterSlot {
                     creature_id: 1,
                     name: "Bulbasaur".to_string(),
-                    slot_id: rand::random::<u64>(),
+                    slot_id: new_slot_id(),
                     level: 1,
                     xp: 0,
                 },
                 RosterSlot {
                     creature_id: 4,
                     name: "Charmander".to_string(),
-                    slot_id: rand::random::<u64>(),
+                    slot_id: new_slot_id(),
                     level: 1,
                     xp: 0,
                 },
                 RosterSlot {
                     creature_id: 7,
                     name: "Squirtle".to_string(),
-                    slot_id: rand::random::<u64>(),
+                    slot_id: new_slot_id(),
                     level: 1,
                     xp: 0,
                 },
                 RosterSlot {
                     creature_id: 25,
                     name: "Pikachu".to_string(),
-                    slot_id: rand::random::<u64>(),
+                    slot_id: new_slot_id(),
                     level: 1,
                     xp: 0,
                 },
                 RosterSlot {
                     creature_id: 133,
                     name: "Eevee".to_string(),
-                    slot_id: rand::random::<u64>(),
+                    slot_id: new_slot_id(),
                     level: 1,
                     xp: 0,
                 },
@@ -154,26 +159,35 @@ impl GameConfig {
     /// Load and validate config from a TOML file.
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
         let content = fs::read_to_string(path)?;
-        let toml_config: TomlConfig = toml::from_str(&content)?;
+        let toml_config: TomlConfig = toml::from_str(&repair_oversized_slot_ids(&content))?;
         Self::from_toml(toml_config)
     }
 
-    /// Load from the default config path (~/.config/poclimon.toml).
-    /// Creates a default config file if it doesn't exist.
-    pub fn load_default() -> Result<Self, ConfigError> {
-        let path = default_config_path();
+    /// Load `path`, or create it with the default roster if it doesn't exist.
+    ///
+    /// A file that exists but fails to read, parse or validate is an error and
+    /// is left untouched: callers must not fall back to defaults and keep the
+    /// path, or the next save would overwrite the user's roster.
+    pub fn load_or_create(path: &Path) -> Result<Self, ConfigError> {
         if path.exists() {
-            Self::load(path)
-        } else {
-            // Create the default config file so the user can discover and edit it
-            let default_toml = TomlConfig::default();
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let content = toml::to_string_pretty(&default_toml)?;
-            fs::write(&path, &content)?;
-            Ok(Self::default())
+            return Self::load(path);
         }
+        // Write the same roster we play with, so the file the user discovers
+        // matches what's on screen.
+        let config = Self::default();
+        let entries: Vec<SlotEntry> = config
+            .roster
+            .iter()
+            .map(|r| SlotEntry {
+                id: r.creature_id,
+                slot_id: r.slot_id,
+                name: r.name.clone(),
+                level: r.level,
+                xp: r.xp,
+            })
+            .collect();
+        write_atomic(path, &render_toml(config.scale, &entries))?;
+        Ok(config)
     }
 
     /// Create a GameConfig from a single creature name (CLI override).
@@ -185,7 +199,7 @@ impl GameConfig {
             roster: vec![RosterSlot {
                 creature_id: creature.id,
                 name: creature.name.to_string(),
-                slot_id: rand::random::<u64>(),
+                slot_id: new_slot_id(),
                 level: 1,
                 xp: 0,
             }],
@@ -213,7 +227,7 @@ impl GameConfig {
 
                 // slot_id == 0 means the old format generated it; give it a fresh random ID.
                 let slot_id = if entry.slot_id == 0 {
-                    rand::random::<u64>()
+                    new_slot_id()
                 } else {
                     entry.slot_id
                 };
@@ -231,7 +245,7 @@ impl GameConfig {
             }
 
             return Ok(Self {
-                scale: toml.display.scale,
+                scale: clamp_scale(toml.display.scale),
                 roster,
             });
         }
@@ -259,7 +273,7 @@ impl GameConfig {
                     roster.push(RosterSlot {
                         creature_id: c.id,
                         name: c.name.to_string(),
-                        slot_id: rand::random::<u64>(),
+                        slot_id: new_slot_id(),
                         level: 1,
                         xp: 0,
                     });
@@ -274,7 +288,7 @@ impl GameConfig {
                 roster.push(RosterSlot {
                     creature_id: c.id,
                     name: c.name.to_string(),
-                    slot_id: rand::random::<u64>(),
+                    slot_id: new_slot_id(),
                     level: 1,
                     xp: 0,
                 });
@@ -286,7 +300,7 @@ impl GameConfig {
         }
 
         Ok(Self {
-            scale: toml.display.scale,
+            scale: clamp_scale(toml.display.scale),
             roster,
         })
     }
@@ -307,28 +321,119 @@ impl GameConfig {
             })
             .collect();
 
-        // Build a minimal TOML document manually so we get the right structure.
-        // We only write [display] and [[slot]] — no legacy [roster] section.
-        let mut out = String::new();
-        out.push_str("[display]\n");
-        out.push_str(&format!("scale = {}\n", scale));
-
-        for entry in &slot_entries {
-            out.push('\n');
-            out.push_str("[[slot]]\n");
-            out.push_str(&format!("id = {}\n", entry.id));
-            out.push_str(&format!("slot_id = {}\n", entry.slot_id));
-            out.push_str(&format!("name = \"{}\"\n", entry.name));
-            out.push_str(&format!("level = {}\n", entry.level));
-            out.push_str(&format!("xp = {}\n", entry.xp));
-        }
-
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(path, out)?;
+        write_atomic(path, &render_toml(scale, &slot_entries))?;
         Ok(())
     }
+}
+
+/// A random, non-zero slot id that fits in a TOML integer (i64).
+///
+/// TOML can't represent u64 values above `i64::MAX`: they're written fine but
+/// fail to parse on the next load. 0 is reserved as "regenerate on load".
+pub fn new_slot_id() -> u64 {
+    loop {
+        let id = rand::random::<u64>() & i64::MAX as u64;
+        if id != 0 {
+            return id;
+        }
+    }
+}
+
+/// Rewrite `slot_id = N` lines whose value doesn't fit in a TOML integer.
+///
+/// Versions up to 0.5.1 generated slot ids from the full u64 range, so most
+/// saves contain at least one id above `i64::MAX`, which the TOML parser
+/// rejects. Slot ids only need to be unique within the roster, so the
+/// oversized ones are masked into range (and are written back that way on
+/// the next save). Every other line is passed through unchanged.
+fn repair_oversized_slot_ids(content: &str) -> std::borrow::Cow<'_, str> {
+    let fix_line = |line: &str| -> Option<String> {
+        let (key, value) = line.split_once('=')?;
+        if key.trim() != "slot_id" {
+            return None;
+        }
+        let digits = value.trim();
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        // Fits already (or not a u64 at all): leave it to the parser.
+        let n: u64 = digits.parse().ok().filter(|&n| n > i64::MAX as u64)?;
+        Some(format!("{key}= {}", n & i64::MAX as u64))
+    };
+
+    if !content.lines().any(|l| fix_line(l).is_some()) {
+        return std::borrow::Cow::Borrowed(content);
+    }
+    let mut out = String::with_capacity(content.len());
+    for line in content.lines() {
+        match fix_line(line) {
+            Some(fixed) => out.push_str(&fixed),
+            None => out.push_str(line),
+        }
+        out.push('\n');
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+fn clamp_scale(scale: u32) -> u32 {
+    scale.clamp(MIN_SCALE, MAX_SCALE)
+}
+
+/// Build the config document: `[display]` plus one `[[slot]]` per entry, with
+/// no legacy `[roster]` section.
+fn render_toml(scale: u32, entries: &[SlotEntry]) -> String {
+    let mut out = String::new();
+    out.push_str("[display]\n");
+    out.push_str(&format!("scale = {}\n", scale));
+
+    for entry in entries {
+        out.push('\n');
+        out.push_str("[[slot]]\n");
+        out.push_str(&format!("id = {}\n", entry.id));
+        out.push_str(&format!("slot_id = {}\n", entry.slot_id));
+        out.push_str(&format!("name = \"{}\"\n", entry.name));
+        out.push_str(&format!("level = {}\n", entry.level));
+        out.push_str(&format!("xp = {}\n", entry.xp));
+    }
+    out
+}
+
+/// Replace `path` with `contents` so that a crash at any point leaves either
+/// the old file or the new one, never a truncated mix.
+///
+/// Writes a hidden sibling temp file, fsyncs it, then renames it over `path`
+/// (rename is atomic within a directory).
+pub fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let dir = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    fs::create_dir_all(dir)?;
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "poclimon.toml".to_string());
+    let tmp = dir.join(format!(".{file_name}.tmp"));
+
+    let result = (|| {
+        let mut file = fs::File::create(&tmp)?;
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
+        fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result?;
+
+    // Persist the rename itself. Best effort: not every platform can open a
+    // directory for syncing.
+    if let Ok(d) = fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
+    Ok(())
 }
 
 /// Get the default config file path.
@@ -565,6 +670,145 @@ creatures = ["pikachu"]
         assert_eq!(deserialized.name, "Pikachu");
         assert_eq!(deserialized.level, 5);
         assert_eq!(deserialized.xp, 100);
+    }
+
+    // ── Save safety ───────────────────────────────────────────────────────
+
+    /// A fresh, empty directory unique to this test.
+    fn test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "poclimon_cfg_{name}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_load_or_create_rejects_corrupt_file_and_leaves_it_untouched() {
+        let dir = test_dir("corrupt");
+        let path = dir.join("poclimon.toml");
+        let broken = "[display]\nscale = 3\n\n[[slot]]\nid = 25\nslot_id = 1\nname = \"Pika";
+        fs::write(&path, broken).unwrap();
+
+        let result = GameConfig::load_or_create(&path);
+
+        assert!(result.is_err(), "corrupt config must not load as defaults");
+        assert_eq!(fs::read_to_string(&path).unwrap(), broken);
+    }
+
+    #[test]
+    fn test_load_or_create_creates_missing_file() {
+        let dir = test_dir("missing");
+        let path = dir.join("nested").join("poclimon.toml");
+
+        let config = GameConfig::load_or_create(&path).unwrap();
+
+        assert!(path.exists());
+        assert!(!config.roster.is_empty());
+        // What was written must load back to the same roster.
+        let reloaded = GameConfig::load(&path).unwrap();
+        let ids = |c: &GameConfig| c.roster.iter().map(|r| r.creature_id).collect::<Vec<_>>();
+        assert_eq!(ids(&reloaded), ids(&config));
+    }
+
+    #[test]
+    fn test_write_atomic_replaces_content_and_leaves_no_temp_file() {
+        let dir = test_dir("atomic");
+        let path = dir.join("poclimon.toml");
+        fs::write(&path, "old").unwrap();
+
+        write_atomic(&path, "new").unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|n| n != "poclimon.toml")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp files left behind: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn test_save_roundtrips_through_load() {
+        let dir = test_dir("roundtrip");
+        let path = dir.join("poclimon.toml");
+        let mut slot = CreatureSlot::new(25, "Pikachu".to_string());
+        slot.slot_id = 42;
+        slot.level = 4;
+        slot.xp = 17;
+
+        GameConfig::save(&path, 3, &[&slot]).unwrap();
+        let config = GameConfig::load(&path).unwrap();
+
+        assert_eq!(config.roster.len(), 1);
+        assert_eq!(config.roster[0].slot_id, 42);
+        assert_eq!(config.roster[0].level, 4);
+        assert_eq!(config.roster[0].xp, 17);
+    }
+
+    #[test]
+    fn test_new_slot_ids_fit_in_a_toml_integer() {
+        // TOML integers are i64; a u64 above i64::MAX can be written but not read back.
+        for _ in 0..10_000 {
+            let id = new_slot_id();
+            assert!(
+                id <= i64::MAX as u64,
+                "slot id {id} won't parse back from TOML"
+            );
+            assert_ne!(id, 0, "0 is the 'regenerate me' sentinel");
+        }
+    }
+
+    #[test]
+    fn test_oversized_slot_id_from_older_versions_still_loads() {
+        // Saves written before this fix can hold u64 slot ids above i64::MAX.
+        let dir = test_dir("oversized");
+        let path = dir.join("poclimon.toml");
+        fs::write(
+            &path,
+            "[display]\nscale = 3\n\n[[slot]]\nid = 4\nslot_id = 11956443417021264552\n\
+             name = \"Charmander\"\nlevel = 2\nxp = 49\n\n[[slot]]\nid = 7\n\
+             slot_id = 6946265537283148646\nname = \"Squirtle\"\nlevel = 3\nxp = 5\n",
+        )
+        .unwrap();
+
+        let config = GameConfig::load(&path).unwrap();
+
+        assert_eq!(config.roster.len(), 2);
+        assert_eq!(config.roster[0].creature_id, 4);
+        assert_eq!(config.roster[0].level, 2);
+        assert_eq!(config.roster[0].xp, 49);
+        assert!(config.roster[0].slot_id <= i64::MAX as u64);
+        assert_ne!(config.roster[0].slot_id, config.roster[1].slot_id);
+        // Ids that already fit are kept as-is.
+        assert_eq!(config.roster[1].slot_id, 6946265537283148646);
+        assert_eq!(config.roster[1].level, 3);
+    }
+
+    #[test]
+    fn test_scale_zero_is_clamped_to_minimum() {
+        let toml_config: TomlConfig =
+            toml::from_str("[display]\nscale = 0\n\n[roster]\ncreatures = [\"pikachu\"]\n")
+                .unwrap();
+        let config = GameConfig::from_toml(toml_config).unwrap();
+        assert_eq!(config.scale, MIN_SCALE);
+    }
+
+    #[test]
+    fn test_huge_scale_is_clamped_to_maximum() {
+        let toml_config: TomlConfig =
+            toml::from_str("[display]\nscale = 500\n\n[roster]\ncreatures = [\"pikachu\"]\n")
+                .unwrap();
+        let config = GameConfig::from_toml(toml_config).unwrap();
+        assert_eq!(config.scale, MAX_SCALE);
     }
 
     #[test]

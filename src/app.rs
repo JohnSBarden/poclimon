@@ -113,14 +113,33 @@ impl App {
     ///
     /// Silently does nothing if no save path is set. Save errors are
     /// non-fatal — the next save attempt will retry.
-    fn save_roster(&self) {
+    fn save_roster(&mut self) {
+        if let Err(e) = self.try_save_roster() {
+            self.notify(NotifLevel::Error, format!("Couldn't save progress: {e}"));
+        }
+    }
+
+    /// Write the roster to `save_path`. A no-op when persistence is off
+    /// (`--creature`).
+    fn try_save_roster(&self) -> Result<(), crate::config::ConfigError> {
         let Some(path) = &self.save_path else {
-            return;
+            return Ok(());
         };
         let slot_refs: Vec<&CreatureSlot> = self.slots.iter().collect();
-        if let Err(e) = GameConfig::save(path, self.config.scale, &slot_refs) {
-            let _ = e; // Can't notify from &self — ignore silently.
-        }
+        GameConfig::save(path, self.config.scale, &slot_refs)
+    }
+
+    /// Final bookkeeping when the game exits: persist the roster (progress
+    /// since the last periodic save would otherwise be lost) and queue
+    /// deletion of every Kitty image this app uploaded. The caller writes
+    /// `term_writes` out before restoring the terminal.
+    ///
+    /// Returns the save result rather than notifying, since the TUI is
+    /// closing and the caller has to report a failure on stderr.
+    pub fn on_quit(&mut self) -> Result<(), crate::config::ConfigError> {
+        let ids = self.all_kitty_ids();
+        self.retire_kitty_images(&ids);
+        self.try_save_roster()
     }
 
     /// Queue deletion of terminal-side Kitty images that are no longer used.
@@ -605,5 +624,62 @@ impl App {
             worker_rx: rx,
             worker_result: None,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fresh, empty directory unique to this test.
+    fn test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "poclimon_app_{name}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn app_saving_to(path: PathBuf) -> App {
+        let config = GameConfig::from_creature_name("pikachu").unwrap();
+        App::new(config, Some(path))
+    }
+
+    #[test]
+    fn test_on_quit_saves_progress_made_since_the_last_save() {
+        let path = test_dir("quit").join("poclimon.toml");
+        let mut app = app_saving_to(path.clone());
+        app.slots[0].level = 7;
+        app.slots[0].xp = 33;
+
+        app.on_quit().unwrap();
+
+        let saved = GameConfig::load(&path).unwrap();
+        assert_eq!(saved.roster.len(), 1);
+        assert_eq!(saved.roster[0].level, 7);
+        assert_eq!(saved.roster[0].xp, 33);
+    }
+
+    #[test]
+    fn test_failed_save_posts_an_error_notification() {
+        // A path whose parent is a regular file can never be written.
+        let dir = test_dir("savefail");
+        let blocker = dir.join("not-a-dir");
+        std::fs::write(&blocker, "").unwrap();
+        let mut app = app_saving_to(blocker.join("poclimon.toml"));
+
+        app.save_roster();
+
+        assert!(
+            app.notifications
+                .iter()
+                .any(|n| matches!(n.level, NotifLevel::Error)),
+            "save failure was swallowed silently"
+        );
     }
 }

@@ -154,7 +154,7 @@ impl CreatureSlot {
     pub fn new(creature_id: u32, creature_name: String) -> Self {
         Self {
             creature_id,
-            slot_id: rand::random::<u64>(),
+            slot_id: crate::config::new_slot_id(),
             creature_name,
             animator: Animator::new(),
             sprites: SpriteCache::new(),

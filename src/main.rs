@@ -58,10 +58,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (cfg, Some(path))
     } else {
         let path = config::default_config_path();
-        let cfg = GameConfig::load_default().unwrap_or_default();
+        // Never fall back to defaults here: the next save would overwrite the
+        // roster in the file we failed to read.
+        let cfg = match GameConfig::load_or_create(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!(
+                    "Error: couldn't load {}: {e}\n\
+                     Your saved roster was left untouched. Fix the file, or move it \
+                     aside to start a new roster.\n\
+                     (`poclimon --creature pikachu` runs without reading it.)",
+                    path.display()
+                );
+                std::process::exit(1);
+            }
+        };
         (cfg, Some(path))
     };
 
+    install_panic_hook();
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -100,9 +115,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let res = run_app(&mut terminal, &mut app, &mut picker);
 
-    // Free the terminal-side image memory Kitty/Ghostty would otherwise keep.
-    let ids = app.all_kitty_ids();
-    app.retire_kitty_images(&ids);
+    // Runs on every exit path out of the loop, including errors: saves the
+    // roster and frees the terminal-side images Kitty/Ghostty would keep.
+    let saved = app.on_quit();
     write_term_writes(&mut app.term_writes);
 
     disable_raw_mode()?;
@@ -112,8 +127,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(e) = res {
         eprintln!("Error: {e}");
     }
+    if let Err(e) = saved {
+        eprintln!("Warning: couldn't save progress: {e}");
+    }
 
     Ok(())
+}
+
+/// Restore the terminal before the panic message prints. Without this a
+/// panic leaves raw mode and the alternate screen on, and the message is
+/// lost with the screen.
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
+        default_hook(info);
+    }));
 }
 
 /// Write queued Kitty uploads/deletes straight to the terminal.
