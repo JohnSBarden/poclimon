@@ -19,7 +19,7 @@ poclimon
 - Feed, sleep, play, and idle animations
 - XP and leveling — creatures gain XP as you interact with them; level persists across sessions
 - Add, remove, and swap creatures live with no restart and no config editing
-- Roster persistence — creature state (XP, level) saved back to config on quit
+- Roster persistence — creature state (XP, level) kept in a signed save, written on quit and every 30 s
 - Full Gen 1–9 Pokédex: any of 1025 creatures by National Dex ID
 - Sprites cached to `~/.config/poclimon/sprites/` — downloaded once, Bill's PC keeps the rest
 - TOML config
@@ -67,30 +67,20 @@ poclimon --config ./my-roster.toml # custom config
 
 ## Configuration
 
-`~/.config/poclimon.toml` is conjured on first run. You can bypass it with `--creature` or `--config`.
-
-As of v0.4.0, the config stores per-creature state so XP and level survive restarts:
+`~/.config/poclimon.toml` is conjured on first run. You can bypass it with `--creature` or `--config`. It holds settings only, and it's safe to edit:
 
 ```toml
 [display]
-scale = 3  # sprite scale multiplier — memory scales quadratically, 3 is the sweet spot
-
-[[slot]]
-id = 25
-slot_id = 8675309
-name = "Pikachu"
-level = 3
-xp = 42
-
-[[slot]]
-id = 133
-slot_id = 8675310
-name = "Eevee"
-level = 1
-xp = 0
+scale = 3  # sprite scale multiplier, 1-8 — memory scales quadratically, 3 is the sweet spot
 ```
 
-The old `[roster]` format is still accepted and auto-migrated on first run.
+### Your save
+
+Your Pokémon (species, levels, XP, unlocks) live in `~/.config/poclimon/save.toml`. It's readable TOML, but it's **signed**: edit it by hand and PoCLImon won't load it. The edited file is kept as `save.toml.rejected-<time>`, and the game restores `save.toml.bak`, the previous good save. Earn your Charizard the honest way.
+
+Rosters stored in `poclimon.toml` by v0.5.x and earlier are moved into the signed save automatically on the first run of a version with signing.
+
+Builds without the release key (`cargo build`, `cargo install`) use a public dev key and a separate `save.dev.toml`, so they never touch a release save.
 
 ---
 

@@ -126,7 +126,7 @@ impl App {
             return Ok(());
         };
         let slot_refs: Vec<&CreatureSlot> = self.slots.iter().collect();
-        GameConfig::save(path, self.config.scale, &slot_refs)
+        GameConfig::save(path, &slot_refs, &self.config.unlocked)
     }
 
     /// Final bookkeeping when the game exits: persist the roster (progress
@@ -659,10 +659,13 @@ mod tests {
 
         app.on_quit().unwrap();
 
-        let saved = GameConfig::load(&path).unwrap();
-        assert_eq!(saved.roster.len(), 1);
-        assert_eq!(saved.roster[0].level, 7);
-        assert_eq!(saved.roster[0].xp, 33);
+        let crate::config::save::LoadOutcome::Loaded(saved) = crate::config::save::load(&path)
+        else {
+            panic!("quit save didn't verify");
+        };
+        assert_eq!(saved.slot.len(), 1);
+        assert_eq!(saved.slot[0].level, 7);
+        assert_eq!(saved.slot[0].xp, 33);
     }
 
     #[test]

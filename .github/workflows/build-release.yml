@@ -9,9 +9,15 @@ jobs:
   build-ubuntu:
     name: Build — Ubuntu (linux + windows)
     runs-on: ubuntu-latest
+    env:
+      # Release save-signing key (see src/config/save.rs). build.rs fails on a
+      # malformed value; the check below catches a missing secret first.
+      POCLIMON_SAVE_KEY: ${{ secrets.POCLIMON_SAVE_KEY }}
     permissions:
       contents: read
     steps:
+      - name: Require save-signing key
+        run: test -n "$POCLIMON_SAVE_KEY" || { echo "::error::POCLIMON_SAVE_KEY secret is not set"; exit 1; }
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -40,9 +46,13 @@ jobs:
   build-macos:
     name: Build — macOS (arm64 + x86_64)
     runs-on: macos-latest
+    env:
+      POCLIMON_SAVE_KEY: ${{ secrets.POCLIMON_SAVE_KEY }}
     permissions:
       contents: read
     steps:
+      - name: Require save-signing key
+        run: test -n "$POCLIMON_SAVE_KEY" || { echo "::error::POCLIMON_SAVE_KEY secret is not set"; exit 1; }
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
