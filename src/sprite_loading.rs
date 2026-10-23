@@ -394,11 +394,11 @@ pub fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<Stri
     // ── Hop (Playing) animation ───────────────────────────────────────────────
     // Try to load "Hop" from PMDCollab. Falls back to Idle frames when missing,
     // following the exact same pattern as Eat/Sleep above.
-    // "Hop" is not in ALL_ANIMS so it's never downloaded; pre_decoded is None.
+    let hop_pre = decoded_sheets.get("Hop");
     let (hop_down_raw, hop_timing_raw, _, _, hop_fallback) = load_and_scale_animation(
         "Hop",
         &sheets,
-        None,
+        hop_pre,
         &anim_infos,
         scale,
         Some((idle_w, idle_h)),
@@ -411,7 +411,7 @@ pub fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<Stri
         let hop_left = load_and_scale_animation(
             "Hop",
             &sheets,
-            None,
+            hop_pre,
             &anim_infos,
             scale,
             Some((idle_w, idle_h)),
@@ -422,7 +422,7 @@ pub fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<Stri
         let hop_up = load_and_scale_animation(
             "Hop",
             &sheets,
-            None,
+            hop_pre,
             &anim_infos,
             scale,
             Some((idle_w, idle_h)),
@@ -433,7 +433,7 @@ pub fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<Stri
         let hop_right = load_and_scale_animation(
             "Hop",
             &sheets,
-            None,
+            hop_pre,
             &anim_infos,
             scale,
             Some((idle_w, idle_h)),
@@ -850,4 +850,22 @@ pub fn encode_halfblock_frame(
     ratatui_image::protocol::halfblocks::Halfblocks::new(canvas, area.as_size())
         .ok()
         .map(Protocol::Halfblocks)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires network access; writes to $HOME/.config/poclimon/sprites"]
+    fn playing_uses_the_hop_sheet_when_one_exists() {
+        let mut slot = CreatureSlot::new(25, "Pikachu".to_string());
+        load_slot_sprites(&mut slot, 1).expect("Pikachu loads");
+        let (hop, idle) = (&slot.sprites.hop[0], &slot.sprites.idle[0]);
+        assert!(!hop.is_empty());
+        assert!(
+            !Arc::ptr_eq(&hop[0], &idle[0]),
+            "Playing fell back to Idle frames"
+        );
+    }
 }

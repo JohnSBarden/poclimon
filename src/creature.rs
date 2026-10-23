@@ -176,6 +176,22 @@ impl CreatureSlot {
         }
     }
 
+    /// Copy position, velocity, facing and wander timers from `other`, so a
+    /// replacement creature continues from where the old one stood.
+    pub fn take_motion_from(&mut self, other: &CreatureSlot) {
+        self.pos_x = other.pos_x;
+        self.pos_y = other.pos_y;
+        self.vel_x = other.vel_x;
+        self.vel_y = other.vel_y;
+        self.current_dir = other.current_dir;
+        self.dir_hold_ticks = other.dir_hold_ticks;
+        self.pause_ticks = other.pause_ticks;
+        self.pause_face_down = other.pause_face_down;
+        self.dir_cooldown_ticks = other.dir_cooldown_ticks;
+        // Without this, render_pen would re-randomize the position.
+        self.position_initialized = other.position_initialized;
+    }
+
     /// Accrue XP for one 50ms tick. Returns the new level if the creature leveled up.
     ///
     /// Only accrues XP while in an XP-earning state (Eating or Playing).
