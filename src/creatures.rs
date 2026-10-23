@@ -22,65 +22,12 @@ pub fn padded_id(id: u32) -> String {
     format!("{id:04}")
 }
 
-/// Default selectable creatures available in PoCLImon.
+/// Find any Pokémon (Gen 1–9) by National Dex ID.
 ///
-/// IDs correspond to National Pokédex numbers. Sprites are sourced from
-/// the PMDCollab SpriteCollab repository and cached locally on first use.
-/// Not to be confused with the user's active session roster (`App::slots`).
-pub const DEFAULT_CREATURES: &[CreatureDef] = &[
-    // Gen 1 starters
-    CreatureDef {
-        id: 1,
-        name: "Bulbasaur",
-    },
-    CreatureDef {
-        id: 4,
-        name: "Charmander",
-    },
-    CreatureDef {
-        id: 7,
-        name: "Squirtle",
-    },
-    // Electric mouse
-    CreatureDef {
-        id: 25,
-        name: "Pikachu",
-    },
-    // Eevee and its evolutions
-    CreatureDef {
-        id: 133,
-        name: "Eevee",
-    },
-    CreatureDef {
-        id: 134,
-        name: "Vaporeon",
-    },
-    CreatureDef {
-        id: 135,
-        name: "Jolteon",
-    },
-    CreatureDef {
-        id: 136,
-        name: "Flareon",
-    },
-    // Legendary birds
-    CreatureDef {
-        id: 144,
-        name: "Articuno",
-    },
-    CreatureDef {
-        id: 145,
-        name: "Zapdos",
-    },
-    CreatureDef {
-        id: 146,
-        name: "Moltres",
-    },
-];
-
-/// Find a creature by ID.
-pub fn find_by_id(id: u32) -> Option<&'static CreatureDef> {
-    DEFAULT_CREATURES.iter().find(|c| c.id == id)
+/// Searches all of `FULL_DEX`, not just a starter list: Add/Swap accept every
+/// species, so loading a saved roster must too.
+pub fn find_by_id(id: u32) -> Option<CreatureDef> {
+    lookup_name(id).map(|name| CreatureDef { id, name })
 }
 
 /// Look up just the display name for any National Dex ID (Gen 1–9).
@@ -1131,22 +1078,18 @@ pub const FULL_DEX: &[(u32, &str)] = &[
     (1025, "Pecharunt"),
 ];
 
-/// Find a creature by name (case-insensitive).
-pub fn find_by_name(name: &str) -> Option<&'static CreatureDef> {
+/// Find any Pokémon (Gen 1–9) by name (case-insensitive).
+pub fn find_by_name(name: &str) -> Option<CreatureDef> {
     let lower = name.to_lowercase();
-    DEFAULT_CREATURES
+    FULL_DEX
         .iter()
-        .find(|c| c.name.to_lowercase() == lower)
+        .find(|(_, n)| n.to_lowercase() == lower)
+        .map(|&(id, name)| CreatureDef { id, name })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_default_creatures_has_eleven_entries() {
-        assert_eq!(DEFAULT_CREATURES.len(), 11);
-    }
 
     #[test]
     fn test_original_five_present() {
@@ -1175,7 +1118,9 @@ mod tests {
     fn test_find_by_id() {
         assert_eq!(find_by_id(25).unwrap().name, "Pikachu");
         assert_eq!(find_by_id(1).unwrap().name, "Bulbasaur");
-        assert!(find_by_id(999).is_none());
+        assert_eq!(find_by_id(999).unwrap().name, "Gimmighoul");
+        assert!(find_by_id(0).is_none());
+        assert!(find_by_id(1026).is_none());
     }
 
     #[test]
@@ -1184,7 +1129,8 @@ mod tests {
         assert_eq!(find_by_name("Charmander").unwrap().id, 4);
         assert_eq!(find_by_name("vaporeon").unwrap().id, 134);
         assert_eq!(find_by_name("ZAPDOS").unwrap().id, 145);
-        assert!(find_by_name("Mewtwo").is_none());
+        assert_eq!(find_by_name("mewtwo").unwrap().id, 150);
+        assert!(find_by_name("MissingNo").is_none());
     }
 
     #[test]
