@@ -89,14 +89,34 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
     // Status + notification panel.
     // Line 0: current creature state.
     // Lines 1–2: most recent notifications, newest first.
-    let mut status_lines = vec![Line::from(vec![
+    let mut first_line = vec![
         Span::styled(
             format!("{selected_name}: "),
             Style::default().fg(GB_LIGHTEST),
         ),
         Span::styled(state_label, Style::default().fg(status_color)),
-    ])];
-    if let Some(transition) = app.swap_transition.as_ref() {
+    ];
+    if app.evolution.is_none()
+        && app
+            .slots
+            .get(app.selected)
+            .is_some_and(|s| s.ready_to_evolve())
+    {
+        first_line.push(Span::styled(
+            "  ✨ Ready to evolve. Press [V]",
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    let mut status_lines = vec![Line::from(first_line)];
+    if let Some(evo) = app.evolution.as_ref() {
+        status_lines.push(Line::from(vec![
+            Span::styled("[Evolve] ", Style::default().fg(Color::LightMagenta)),
+            Span::styled(
+                format!("What? {} is evolving!", evo.from_name),
+                Style::default().fg(Color::LightMagenta),
+            ),
+        ]));
+    } else if let Some(transition) = app.swap_transition.as_ref() {
         let action = if transition.recall_ticks > 0 {
             "Recalling"
         } else {
@@ -129,11 +149,7 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
         ]));
     }
 
-    let notif_rows = if app.swap_transition.is_some() || app.add_transition.is_some() {
-        1
-    } else {
-        2
-    };
+    let notif_rows = if app.has_background_load() { 1 } else { 2 };
     for notif in app.notifications.iter().rev().take(notif_rows) {
         let (prefix, color) = match notif.level {
             NotifLevel::Error => ("[Error] ", Color::Red),
@@ -164,6 +180,7 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
         ("[P]", "lay"),
         ("[A]", "dd"),
         ("[R]", "emove"),
+        ("[V]", "olve"),
         ("[Tab]", "swap"),
         ("[←→]", "select"),
     ];
@@ -189,12 +206,46 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
     );
     f.render_widget(help, chunks[3]);
 
+    // Branch popup: one numbered line per species the creature can become.
+    if app.prompt_mode == PromptMode::EvolveChoice {
+        let n = app.evolve_choices.len() as u16;
+        let popup_w = 32u16;
+        let popup_h = n + 3; // borders + hint line
+        let popup_x = chunks[1].x + (chunks[1].width.saturating_sub(popup_w)) / 2;
+        let popup_y = chunks[1].y + (chunks[1].height.saturating_sub(popup_h)) / 2;
+        let popup_area = Rect::new(popup_x, popup_y, popup_w, popup_h).intersection(chunks[1]);
+        f.render_widget(Clear, popup_area);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Evolve into ")
+            .border_style(Style::default().fg(Color::Yellow))
+            .style(Style::default().bg(GB_DARKEST));
+        let inner = block.inner(popup_area);
+        f.render_widget(block, popup_area);
+        let mut lines: Vec<Line> = app
+            .evolve_choices
+            .iter()
+            .enumerate()
+            .map(|(i, &id)| {
+                let name = crate::creatures::lookup_name(id).unwrap_or("???");
+                Line::styled(
+                    format!("[{}] {name}", i + 1),
+                    Style::default().fg(GB_LIGHTEST),
+                )
+            })
+            .collect();
+        lines.push(Line::styled(
+            "[Esc] cancel",
+            Style::default().fg(Color::DarkGray),
+        ));
+        f.render_widget(Paragraph::new(lines), inner);
+    }
+
     // Prompt overlay — appears centered over the pen area when Add or Swap is active.
-    if app.prompt_mode != PromptMode::None {
+    if matches!(app.prompt_mode, PromptMode::Add | PromptMode::Swap) {
         let title = match app.prompt_mode {
             PromptMode::Add => " Add Pokémon ",
-            PromptMode::Swap => " Swap to Pokémon ",
-            PromptMode::None => "",
+            _ => " Swap to Pokémon ",
         };
         // Small centered popup: 32 wide, 4 tall.
         let popup_w = 32u16;

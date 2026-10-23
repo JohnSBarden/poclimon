@@ -243,6 +243,25 @@ fn run_app(
 
 fn handle_key(app: &mut App, code: KeyCode) {
     match code {
+        // ── Evolution branch popup: a digit picks, Esc cancels ──
+        _ if app.prompt_mode == app::PromptMode::EvolveChoice => match code {
+            KeyCode::Esc => {
+                app.prompt_mode = app::PromptMode::None;
+                app.evolve_choices.clear();
+            }
+            KeyCode::Char(c) => {
+                let picked = c
+                    .to_digit(10)
+                    .and_then(|d| (d as usize).checked_sub(1))
+                    .and_then(|i| app.evolve_choices.get(i).copied());
+                if let Some(target) = picked {
+                    app.prompt_mode = app::PromptMode::None;
+                    app.evolve_choices.clear();
+                    app.start_evolution(target);
+                }
+            }
+            _ => {}
+        },
         // ── Prompt intercept — handles all keys when a prompt is open ──
         _ if app.prompt_mode != app::PromptMode::None => match code {
             KeyCode::Esc => {
@@ -258,7 +277,7 @@ fn handle_key(app: &mut App, code: KeyCode) {
                     match mode {
                         app::PromptMode::Add => app.add_creature_by_dex(id),
                         app::PromptMode::Swap => app.swap_selected_to_dex(id),
-                        app::PromptMode::None => {}
+                        app::PromptMode::None | app::PromptMode::EvolveChoice => {}
                     }
                 } else {
                     app.notify(
@@ -305,6 +324,7 @@ fn handle_key(app: &mut App, code: KeyCode) {
         KeyCode::Char('r') | KeyCode::Char('R') => {
             app.remove_selected();
         }
+        KeyCode::Char('v') | KeyCode::Char('V') => app.request_evolution(),
         KeyCode::Tab => {
             if app.has_background_load() {
                 app.notify(

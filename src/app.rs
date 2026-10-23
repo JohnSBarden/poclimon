@@ -1,7 +1,10 @@
 use crate::config::{GameConfig, MAX_ACTIVE_CREATURES};
 use crate::creature::CreatureSlot;
 use crate::notification::{MAX_NOTIFICATIONS, NotifLevel, Notification};
-use crate::sprite_loading::{AddTransition, SpriteEncoder, SwapTransition, SwapWorkerResult};
+use crate::sprite_loading::{
+    AddTransition, EVOLVE_TICKS, EvolutionTransition, SpriteEncoder, SwapTransition,
+    SwapWorkerResult,
+};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::mpsc::{self};
@@ -18,6 +21,8 @@ pub enum PromptMode {
     Add,
     /// "Swap selected Pokémon" prompt — typing Pokédex number.
     Swap,
+    /// Choosing which branch to evolve into (`App::evolve_choices`).
+    EvolveChoice,
 }
 
 pub struct App {
@@ -29,6 +34,9 @@ pub struct App {
     pub notifications: VecDeque<Notification>,
     pub swap_transition: Option<SwapTransition>,
     pub add_transition: Option<AddTransition>,
+    pub evolution: Option<EvolutionTransition>,
+    /// Species offered by the branch popup (`PromptMode::EvolveChoice`).
+    pub evolve_choices: Vec<u32>,
     /// Background sprite loads kicked off at startup — one per initial roster slot.
     /// Each entry is (slot_id, expected_creature_id, receiver). The creature_id
     /// guard discards results if the slot was swapped before the load finished.
@@ -92,6 +100,8 @@ impl App {
             notifications: VecDeque::new(),
             swap_transition: None,
             add_transition: None,
+            evolution: None,
+            evolve_choices: Vec::new(),
             startup_loads: Vec::new(),
             toy_image,
             toy_proto: None,
@@ -157,9 +167,19 @@ impl App {
 
     /// Every Kitty image id this app has encoded that is still in use.
     pub fn all_kitty_ids(&self) -> Vec<u32> {
+        // Include the evolving creature's new form: its silhouette may already
+        // have been uploaded during the flicker.
+        let pending = self
+            .evolution
+            .as_ref()
+            .and_then(|e| match &e.worker_result {
+                Some(SwapWorkerResult::Loaded { slot, .. }) => Some(&slot.sprites.kitty_ids),
+                _ => None,
+            });
         self.slots
             .iter()
             .flat_map(|s| s.sprites.kitty_ids.iter().copied())
+            .chain(pending.into_iter().flatten().copied())
             .chain(self.toy_kitty_id)
             .collect()
     }
@@ -297,6 +317,7 @@ impl App {
         self.update_startup_loads();
         self.update_swap_transition();
         self.update_add_transition();
+        self.update_evolution();
         self.expire_notifications(Duration::from_secs(crate::notification::NOTIF_TTL_SECS));
 
         // Periodic save every 30 seconds.
@@ -314,6 +335,7 @@ impl App {
             return;
         };
         let transition_slot_index = self.transition_slot_index();
+        let evolving_slot_index = self.evolving_slot_index();
 
         for (i, slot) in self.slots.iter_mut().enumerate() {
             if slot.sprites.encoded_rect.is_none() {
@@ -322,7 +344,8 @@ impl App {
             let is_moving = matches!(
                 slot.animator.state(),
                 crate::animation::AnimationState::Idle
-            ) && transition_slot_index != Some(i);
+            ) && transition_slot_index != Some(i)
+                && evolving_slot_index != Some(i);
             slot.update_position(pen_w, pen_h, crate::creature::SPRITE_W, sprite_h, is_moving);
         }
 
@@ -362,7 +385,10 @@ impl App {
                 format!("{name} leveled up! Now level {level} ✨"),
             );
             if became_ready {
-                self.notify(NotifLevel::Info, format!("✨ {name} is ready to evolve!"));
+                self.notify(
+                    NotifLevel::Info,
+                    format!("✨ {name} is ready to evolve! Press [V]"),
+                );
             }
         }
         if leveled_up {
@@ -379,7 +405,10 @@ impl App {
             .map(|s| s.creature_name.clone())
             .collect();
         for name in ready {
-            self.notify(NotifLevel::Info, format!("✨ {name} is ready to evolve!"));
+            self.notify(
+                NotifLevel::Info,
+                format!("✨ {name} is ready to evolve! Press [V]"),
+            );
         }
     }
 
@@ -426,7 +455,149 @@ impl App {
     }
 
     pub fn has_background_load(&self) -> bool {
-        self.swap_transition.is_some() || self.add_transition.is_some()
+        self.swap_transition.is_some() || self.add_transition.is_some() || self.evolution.is_some()
+    }
+
+    /// Index of the creature currently evolving, if any.
+    pub fn evolving_slot_index(&self) -> Option<usize> {
+        let id = self.evolution.as_ref()?.slot_id;
+        self.slots.iter().position(|s| s.slot_id == id)
+    }
+
+    /// `V`: evolve the selected creature, asking first if it can branch.
+    pub fn request_evolution(&mut self) {
+        if self.has_background_load() {
+            self.notify(
+                NotifLevel::Warn,
+                "Please wait for the current load to finish",
+            );
+            return;
+        }
+        let Some(slot) = self.slots.get(self.selected) else {
+            return;
+        };
+        let name = slot.creature_name.clone();
+        let options = crate::evolutions::level_evolutions(slot.creature_id, slot.level);
+        match options.as_slice() {
+            [] => {
+                let msg = match crate::evolutions::next_evolution_level(slot.creature_id) {
+                    Some(at) => format!("{name} evolves at Lv.{at} (now Lv.{})", slot.level),
+                    None => format!("{name} can't evolve by leveling up yet"),
+                };
+                self.notify(NotifLevel::Info, msg);
+            }
+            [only] => self.start_evolution(*only),
+            _ => {
+                self.evolve_choices = options;
+                self.prompt_mode = PromptMode::EvolveChoice;
+            }
+        }
+    }
+
+    /// Begin evolving the selected creature into `target_id`: load the new
+    /// form in the background while the flicker plays.
+    pub fn start_evolution(&mut self, target_id: u32) {
+        let Some(slot) = self.slots.get(self.selected) else {
+            return;
+        };
+        let Some(target_name) = crate::creatures::lookup_name(target_id) else {
+            return;
+        };
+        let from_name = slot.creature_name.clone();
+        let slot_id = slot.slot_id;
+        let worker_name = target_name.to_string();
+        let scale = self.config.scale;
+        let encoder = self.encoder.clone();
+        let (tx, rx) = mpsc::channel::<SwapWorkerResult>();
+        std::thread::spawn(move || {
+            let mut new_slot = CreatureSlot::new(target_id, worker_name);
+            let msg = match crate::sprite_loading::load_slot_sprites(&mut new_slot, scale) {
+                Ok(warnings) => {
+                    if let Some(enc) = &encoder {
+                        enc.encode(&mut new_slot);
+                    }
+                    SwapWorkerResult::Loaded {
+                        slot: Box::new(new_slot),
+                        warnings,
+                    }
+                }
+                Err(e) => SwapWorkerResult::Failed(e.to_string()),
+            };
+            let _ = tx.send(msg);
+        });
+        self.notify(NotifLevel::Info, format!("What? {from_name} is evolving!"));
+        self.evolution = Some(EvolutionTransition {
+            slot_id,
+            from_name,
+            target_id,
+            target_name: target_name.to_string(),
+            elapsed_ticks: 0,
+            worker_rx: rx,
+            worker_result: None,
+        });
+    }
+
+    /// Advance an in-progress evolution; apply it once the flicker has run
+    /// its course and the new form has loaded.
+    pub fn update_evolution(&mut self) {
+        let Some(evo) = self.evolution.as_mut() else {
+            return;
+        };
+        if evo.worker_result.is_none()
+            && let Ok(result) = evo.worker_rx.try_recv()
+        {
+            evo.worker_result = Some(result);
+        }
+        evo.elapsed_ticks = evo.elapsed_ticks.saturating_add(1);
+
+        if let Some(SwapWorkerResult::Failed(err)) = &evo.worker_result {
+            let msg = format!("{} couldn't evolve: {err}", evo.from_name);
+            self.evolution = None;
+            self.notify(NotifLevel::Error, msg);
+            return;
+        }
+        let done = evo.elapsed_ticks >= EVOLVE_TICKS && evo.worker_result.is_some();
+        if !done {
+            return;
+        }
+        let evo = self.evolution.take().expect("checked above");
+        let Some(SwapWorkerResult::Loaded {
+            slot: new,
+            warnings,
+        }) = evo.worker_result
+        else {
+            unreachable!("Failed handled above");
+        };
+        let Some(index) = self.slots.iter().position(|s| s.slot_id == evo.slot_id) else {
+            self.retire_kitty_images(&new.sprites.kitty_ids);
+            return;
+        };
+
+        // Same creature, new species: slot_id, level, XP, position and the
+        // current action carry over.
+        let new = *new;
+        let slot = &mut self.slots[index];
+        slot.creature_id = evo.target_id;
+        slot.creature_name = evo.target_name.clone();
+        let old_ids = std::mem::replace(&mut slot.sprites, new.sprites).kitty_ids;
+        slot.animator.adopt_timings(new.animator);
+        self.retire_kitty_images(&old_ids);
+
+        if !self.config.unlocked.contains(&evo.target_id) {
+            self.config.unlocked.push(evo.target_id);
+            self.config.unlocked.sort_unstable();
+        }
+        self.save_roster();
+        self.notify(
+            NotifLevel::Info,
+            format!(
+                "Congratulations! Your {} evolved into {}!",
+                evo.from_name, evo.target_name
+            ),
+        );
+        for w in warnings {
+            self.notify(NotifLevel::Warn, w);
+        }
     }
 
     /// Remove the currently selected slot from the roster.
@@ -835,8 +1006,187 @@ mod tests {
         let ready = app
             .notifications
             .iter()
-            .filter(|n| n.message == "✨ Bulbasaur is ready to evolve!")
+            .filter(|n| n.message == "✨ Bulbasaur is ready to evolve! Press [V]")
             .count();
         assert_eq!(ready, 1);
+    }
+
+    /// An app whose first creature (Bulbasaur, Lv 16) is mid-evolution into
+    /// Ivysaur, with the worker's channel handed back to the test.
+    fn evolving_app() -> (App, mpsc::Sender<SwapWorkerResult>) {
+        let mut app = App::new(GameConfig::default(), None);
+        let slot = &mut app.slots[0];
+        slot.level = 16;
+        slot.xp = 123;
+        slot.pos_x = 9.0;
+        let (tx, rx) = mpsc::channel();
+        app.evolution = Some(EvolutionTransition {
+            slot_id: slot.slot_id,
+            from_name: "Bulbasaur".to_string(),
+            target_id: 2,
+            target_name: "Ivysaur".to_string(),
+            elapsed_ticks: 0,
+            worker_rx: rx,
+            worker_result: None,
+        });
+        (app, tx)
+    }
+
+    #[test]
+    fn evolution_applies_after_the_flicker_and_keeps_progress() {
+        let (mut app, tx) = evolving_app();
+        let slot_id = app.slots[0].slot_id;
+        tx.send(loaded_result(&CreatureSlot::new(2, "Ivysaur".into())))
+            .unwrap();
+
+        for _ in 0..EVOLVE_TICKS - 1 {
+            app.update_evolution();
+        }
+        assert_eq!(
+            app.slots[0].creature_id, 1,
+            "applied before the flicker ended"
+        );
+        app.update_evolution();
+
+        let slot = &app.slots[0];
+        assert_eq!(
+            (slot.creature_id, slot.creature_name.as_str()),
+            (2, "Ivysaur")
+        );
+        assert_eq!((slot.slot_id, slot.level, slot.xp), (slot_id, 16, 123));
+        assert_eq!(slot.pos_x, 9.0);
+        assert_eq!(slot.sprites.idle[0].len(), 1, "new sprites not swapped in");
+        assert!(app.evolution.is_none());
+        assert!(app.config.unlocked.contains(&2));
+        assert!(!app.slots[0].ready_to_evolve()); // Ivysaur's next is Lv 32
+        assert!(
+            app.notifications
+                .iter()
+                .any(|n| n.message == "Congratulations! Your Bulbasaur evolved into Ivysaur!")
+        );
+    }
+
+    #[test]
+    fn evolution_is_saved_with_the_unlock() {
+        let (mut app, tx) = evolving_app();
+        let path = test_dir("evolve-save").join("save.toml");
+        app.save_path = Some(path.clone());
+        let slot_id = app.slots[0].slot_id;
+        tx.send(loaded_result(&CreatureSlot::new(2, "Ivysaur".into())))
+            .unwrap();
+        for _ in 0..EVOLVE_TICKS {
+            app.update_evolution();
+        }
+
+        let crate::config::save::LoadOutcome::Loaded(saved) = crate::config::save::load(&path)
+        else {
+            panic!("evolution wasn't saved");
+        };
+        let evolved = saved.slot.iter().find(|s| s.slot_id == slot_id).unwrap();
+        assert_eq!((evolved.id, evolved.level, evolved.xp), (2, 16, 123));
+        assert_eq!(saved.progress.unlocked, vec![2]);
+    }
+
+    #[test]
+    fn evolution_waits_for_a_slow_load() {
+        let (mut app, tx) = evolving_app();
+        for _ in 0..EVOLVE_TICKS * 2 {
+            app.update_evolution();
+        }
+        assert!(app.evolution.is_some());
+        tx.send(loaded_result(&CreatureSlot::new(2, "Ivysaur".into())))
+            .unwrap();
+        app.update_evolution();
+        assert_eq!(app.slots[0].creature_id, 2);
+    }
+
+    #[test]
+    fn failed_evolution_keeps_the_old_species() {
+        let (mut app, tx) = evolving_app();
+        tx.send(SwapWorkerResult::Failed("offline".into())).unwrap();
+        app.update_evolution();
+
+        assert!(app.evolution.is_none());
+        assert_eq!(app.slots[0].creature_id, 1);
+        assert!(app.slots[0].ready_to_evolve(), "can retry");
+        assert!(app.config.unlocked.is_empty());
+        assert!(
+            app.notifications
+                .iter()
+                .any(|n| matches!(n.level, NotifLevel::Error) && n.message.contains("offline"))
+        );
+    }
+
+    #[test]
+    fn flicker_shows_the_new_form_only_once_loaded() {
+        let (mut app, tx) = evolving_app();
+        let shown = |app: &mut App| -> Vec<bool> {
+            (0..EVOLVE_TICKS)
+                .map(|t| {
+                    let evo = app.evolution.as_mut().unwrap();
+                    evo.elapsed_ticks = t;
+                    evo.shows_new_form()
+                })
+                .collect()
+        };
+        assert!(shown(&mut app).iter().all(|&new| !new));
+
+        tx.send(loaded_result(&CreatureSlot::new(2, "Ivysaur".into())))
+            .unwrap();
+        let evo = app.evolution.as_mut().unwrap();
+        evo.worker_result = evo.worker_rx.try_recv().ok();
+        let frames = shown(&mut app);
+        let toggles = frames.windows(2).filter(|w| w[0] != w[1]).count();
+        assert!(!frames[0], "starts on the old form");
+        assert!(toggles > 20, "only {toggles} toggles");
+        // Faster and faster: the first switch takes longer than the last.
+        let first = frames.iter().position(|&n| n).unwrap();
+        assert!(first >= 8, "first switch at tick {first}");
+    }
+
+    #[test]
+    fn branching_evolution_asks_which_form() {
+        let mut app = App::new(GameConfig::from_creature_name("tyrogue").unwrap(), None);
+        app.slots[0].level = 20;
+        app.request_evolution();
+        assert_eq!(app.prompt_mode, PromptMode::EvolveChoice);
+        assert_eq!(app.evolve_choices, vec![106, 107, 237]);
+        assert!(app.evolution.is_none());
+    }
+
+    #[test]
+    fn evolving_too_early_says_when() {
+        let mut app = App::new(GameConfig::default(), None);
+        app.slots[0].level = 3;
+        app.request_evolution();
+        assert!(app.evolution.is_none());
+        assert_eq!(
+            app.notifications.back().unwrap().message,
+            "Bulbasaur evolves at Lv.16 (now Lv.3)"
+        );
+
+        app.select_slot(4); // Eevee: item evolutions only, deferred
+        app.request_evolution();
+        assert_eq!(
+            app.notifications.back().unwrap().message,
+            "Eevee can't evolve by leveling up yet"
+        );
+    }
+
+    #[test]
+    fn evolution_is_blocked_during_a_swap() {
+        let mut app = App::new(GameConfig::default(), None);
+        app.slots[0].level = 16;
+        let (_tx, rx) = mpsc::channel();
+        app.swap_transition = Some(SwapTransition {
+            slot_index: 1,
+            recall_ticks: RECALL_TICKS,
+            target_name: "Mew".to_string(),
+            worker_rx: rx,
+            worker_result: None,
+        });
+        app.request_evolution();
+        assert!(app.evolution.is_none());
+        assert!(app.notifications.back().unwrap().message.contains("wait"));
     }
 }
