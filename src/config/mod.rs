@@ -423,17 +423,20 @@ pub struct LoadedGame {
     pub notice: Option<String>,
 }
 
+/// Startup notice for a rejected save. Kept under ~65 chars so it fits the
+/// status panel of an 80-column terminal; the rejected file is kept as
+/// `<save>.rejected-<time>` (documented in the README).
 fn problem_notice(problem: save::Problem, restored: bool) -> String {
     let what = match problem {
-        save::Problem::Tampered => "Your save was modified outside PoCLImon and was not loaded",
-        save::Problem::Damaged => "Your save file was damaged",
+        save::Problem::Tampered => "Save was edited outside PoCLImon",
+        save::Problem::Damaged => "Save file was damaged",
     };
     let then = if restored {
-        "restored the last backup"
+        "loaded the backup instead"
     } else {
-        "no backup was usable, so this is a new game"
+        "no usable backup, new game"
     };
-    format!("{what}; {then}. The old file was kept next to it as *.rejected-<time>")
+    format!("{what}; {then}")
 }
 
 /// A random, non-zero slot id that fits in a TOML integer (i64).
@@ -888,7 +891,12 @@ creatures = ["pikachu"]
         let again = GameConfig::load_game(&path).unwrap();
 
         assert_eq!(again.config.roster[0].level, 2, "backup not restored");
-        assert!(again.notice.unwrap().contains("modified outside"));
+        let notice = again.notice.unwrap();
+        assert!(notice.contains("edited outside"));
+        assert!(
+            notice.chars().count() <= 65,
+            "notice too long for 80 columns: {notice}"
+        );
     }
 
     #[test]
