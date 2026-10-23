@@ -809,11 +809,9 @@ pub fn encode_toy_image(
         // Center the scaled image on a transparent canvas.
         let ox = pw.saturating_sub(scaled.width()) / 2;
         let oy = ph.saturating_sub(scaled.height()) / 2;
-        let mut canvas = image::DynamicImage::ImageRgba8(image::RgbaImage::new(pw, ph));
-        image::imageops::overlay(&mut canvas, &scaled, ox as i64, oy as i64);
-        ratatui_image::protocol::halfblocks::Halfblocks::new(canvas, area.as_size())
-            .ok()
-            .map(Protocol::Halfblocks)
+        let mut canvas = image::RgbaImage::new(pw, ph);
+        image::imageops::overlay(&mut canvas, &scaled.to_rgba8(), ox as i64, oy as i64);
+        halfblocks_keeping_transparency(canvas, area)
     } else {
         picker
             .new_protocol(
@@ -845,9 +843,38 @@ pub fn encode_halfblock_frame(
     let resized = img.resize(pw, ph, FilterType::Lanczos3);
     let ox = pw.saturating_sub(resized.width()) / 2;
     let oy = ph.saturating_sub(resized.height()) / 2;
-    let mut canvas = image::DynamicImage::ImageRgba8(image::RgbaImage::new(pw, ph));
-    image::imageops::overlay(&mut canvas, &resized, ox as i64, oy as i64);
-    ratatui_image::protocol::halfblocks::Halfblocks::new(canvas, area.as_size())
-        .ok()
-        .map(Protocol::Halfblocks)
+    let mut canvas = image::RgbaImage::new(pw, ph);
+    image::imageops::overlay(&mut canvas, &resized.to_rgba8(), ox as i64, oy as i64);
+    halfblocks_keeping_transparency(canvas, area)
+}
+
+/// Stand-in colour for transparent pixels in halfblock images.
+///
+/// ratatui-image's halfblock encoder drops alpha, so transparent pixels came
+/// out black and every sprite sat on a black box. Transparent pixels are
+/// painted this exact colour instead, and `ui::pen` puts back whatever was
+/// beneath after drawing (see `restore_halfblock_transparency`).
+pub const HALFBLOCK_CLEAR: ratatui::style::Color = ratatui::style::Color::Rgb(1, 2, 3);
+
+/// Encode a `pw × ph` canvas (already the exact halfblock pixel size, so the
+/// encoder's own resize changes nothing) with transparency marked.
+pub fn halfblocks_keeping_transparency(
+    canvas: image::RgbaImage,
+    area: ratatui::layout::Rect,
+) -> Option<Protocol> {
+    let rgb = image::RgbImage::from_fn(canvas.width(), canvas.height(), |x, y| {
+        let p = canvas.get_pixel(x, y);
+        match (p[3] < 128, [p[0], p[1], p[2]]) {
+            (true, _) => image::Rgb([1, 2, 3]),
+            // A real pixel that happens to match keeps its look but not the mark.
+            (false, [1, 2, 3]) => image::Rgb([1, 2, 4]),
+            (false, c) => image::Rgb(c),
+        }
+    });
+    ratatui_image::protocol::halfblocks::Halfblocks::new(
+        image::DynamicImage::ImageRgb8(rgb),
+        area.as_size(),
+    )
+    .ok()
+    .map(Protocol::Halfblocks)
 }
