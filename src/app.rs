@@ -410,7 +410,7 @@ impl App {
                     | crate::animation::AnimationState::Playing
             );
             if !is_xp_state {
-                slot.anim_active_secs = 0.0;
+                slot.active_ticks = 0;
             }
         }
     }
