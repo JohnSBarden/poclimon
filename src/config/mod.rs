@@ -615,7 +615,7 @@ creatures = []
     fn test_validation_unknown_creature() {
         let toml_str = r#"
 [roster]
-creatures = ["mewtwo"]
+creatures = ["missingno"]
 "#;
         let toml_config: TomlConfig = toml::from_str(toml_str).unwrap();
         let result = GameConfig::from_toml(toml_config);
@@ -644,7 +644,7 @@ creatures = ["mewtwo"]
 
     #[test]
     fn test_from_creature_name_unknown() {
-        let result = GameConfig::from_creature_name("mewtwo");
+        let result = GameConfig::from_creature_name("missingno");
         assert!(result.is_err());
     }
 
@@ -987,5 +987,28 @@ xp = 0
         let toml_config: TomlConfig = toml::from_str(toml_str).unwrap();
         let config = GameConfig::from_toml(toml_config).unwrap();
         assert_ne!(config.roster[0].slot_id, 0);
+    }
+
+    #[test]
+    fn test_any_pokedex_species_survives_a_save_and_reload() {
+        // Add/Swap accept all 1025 species; a save must load back every one.
+        let dir = test_dir("full-dex");
+        let path = dir.join("poclimon.toml");
+        let game = GameConfig::load_game(&path).unwrap();
+        let mewtwo = CreatureSlot::new(150, "Mewtwo".to_string());
+        let pecharunt = CreatureSlot::new(1025, "Pecharunt".to_string());
+        GameConfig::save(&game.save_path, &[&mewtwo, &pecharunt], &[]).unwrap();
+
+        let again = GameConfig::load_game(&path).unwrap();
+
+        assert_eq!(ids(&again.config), vec![150, 1025]);
+        assert_eq!(again.config.roster[0].name, "Mewtwo");
+    }
+
+    #[test]
+    fn test_legacy_roster_accepts_any_species_name() {
+        let toml_str = "[roster]\ncreatures = [\"mewtwo\", \"Pecharunt\"]\n";
+        let config = GameConfig::from_toml(toml::from_str(toml_str).unwrap()).unwrap();
+        assert_eq!(ids(&config), vec![150, 1025]);
     }
 }

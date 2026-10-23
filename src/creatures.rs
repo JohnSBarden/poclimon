@@ -78,9 +78,12 @@ pub const DEFAULT_CREATURES: &[CreatureDef] = &[
     },
 ];
 
-/// Find a creature by ID.
-pub fn find_by_id(id: u32) -> Option<&'static CreatureDef> {
-    DEFAULT_CREATURES.iter().find(|c| c.id == id)
+/// Find any Pokémon (Gen 1–9) by National Dex ID.
+///
+/// Searches `FULL_DEX`, not just `DEFAULT_CREATURES`: Add/Swap accept every
+/// species, so loading a saved roster must too.
+pub fn find_by_id(id: u32) -> Option<CreatureDef> {
+    lookup_name(id).map(|name| CreatureDef { id, name })
 }
 
 /// Look up just the display name for any National Dex ID (Gen 1–9).
@@ -1131,12 +1134,13 @@ pub const FULL_DEX: &[(u32, &str)] = &[
     (1025, "Pecharunt"),
 ];
 
-/// Find a creature by name (case-insensitive).
-pub fn find_by_name(name: &str) -> Option<&'static CreatureDef> {
+/// Find any Pokémon (Gen 1–9) by name (case-insensitive).
+pub fn find_by_name(name: &str) -> Option<CreatureDef> {
     let lower = name.to_lowercase();
-    DEFAULT_CREATURES
+    FULL_DEX
         .iter()
-        .find(|c| c.name.to_lowercase() == lower)
+        .find(|(_, n)| n.to_lowercase() == lower)
+        .map(|&(id, name)| CreatureDef { id, name })
 }
 
 #[cfg(test)]
@@ -1175,7 +1179,9 @@ mod tests {
     fn test_find_by_id() {
         assert_eq!(find_by_id(25).unwrap().name, "Pikachu");
         assert_eq!(find_by_id(1).unwrap().name, "Bulbasaur");
-        assert!(find_by_id(999).is_none());
+        assert_eq!(find_by_id(999).unwrap().name, "Gimmighoul");
+        assert!(find_by_id(0).is_none());
+        assert!(find_by_id(1026).is_none());
     }
 
     #[test]
@@ -1184,7 +1190,8 @@ mod tests {
         assert_eq!(find_by_name("Charmander").unwrap().id, 4);
         assert_eq!(find_by_name("vaporeon").unwrap().id, 134);
         assert_eq!(find_by_name("ZAPDOS").unwrap().id, 145);
-        assert!(find_by_name("Mewtwo").is_none());
+        assert_eq!(find_by_name("mewtwo").unwrap().id, 150);
+        assert!(find_by_name("MissingNo").is_none());
     }
 
     #[test]
