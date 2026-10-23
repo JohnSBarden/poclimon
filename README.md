@@ -17,7 +17,8 @@ poclimon
 - Animated sprite art in your terminal — Kitty, Sixel, iTerm2, and halfblock for the rest
 - Up to 6 creatures sharing one open pen with elastic collision physics
 - Feed, sleep, play, and idle animations
-- XP and leveling — creatures gain XP as you interact with them; level persists across sessions
+- XP and leveling — creatures gain XP as you interact with them (and slowly while idle); level persists across sessions
+- Unlocks — base forms are free, evolved forms are earned
 - Add, remove, and swap creatures live with no restart and no config editing
 - Roster persistence — creature state (XP, level) kept in a signed save, written on quit and every 30 s
 - Full Gen 1–9 Pokédex: any of 1025 creatures by National Dex ID
@@ -86,21 +87,11 @@ Builds without the release key (`cargo build`, `cargo install`) use a public dev
 
 ## Starter Roster
 
-11 creatures ship ready-to-go. Hit `A` to add them live, or summon anything from the 1025-strong Pokédex by Dex ID.
+You start with Bulbasaur, Charmander, Squirtle, Pikachu and Eevee. Hit `A` to add more live, or `Tab` to swap, by Pokédex number.
 
-| Name       | ID  |
-| ---------- | --- |
-| Bulbasaur  | 1   |
-| Charmander | 4   |
-| Squirtle   | 7   |
-| Pikachu    | 25  |
-| Eevee      | 133 |
-| Vaporeon   | 134 |
-| Jolteon    | 135 |
-| Flareon    | 136 |
-| Articuno   | 144 |
-| Zapdos     | 145 |
-| Moltres    | 146 |
+**What you can pick:** any **base form** (562 of the 1025, from Bulbasaur to Mewtwo), plus anything you've **unlocked by evolving** into it. Evolved forms like Ivysaur or Charizard are locked until you earn them. Species whose pre-evolution is a baby (Pikachu, Snorlax, Clefairy...) count as base forms, and Vaporeon, Jolteon and Flareon stay pickable until item evolution exists.
+
+**Leveling:** Eat or Play earns 2 XP/s for 10 s, then 1 XP/s up to 40 s. Every other moment earns 0.1 XP/s, so a pen left running still grows. Level *n* → *n*+1 takes 50 × *n* XP. When a creature reaches its real evolution level (Bulbasaur at 16, Charmeleon at 36...), its nameplate shows `✨`. Evolving it in the pen is coming next.
 
 ---
 
@@ -118,5 +109,7 @@ Builds without the release key (`cargo build`, `cargo install`) use a public dev
 ## Credits
 
 Sprites from [PMDCollab SpriteCollab](https://sprites.pmdcollab.org/) — community PMD sprite sheets, licensed **CC BY-NC**.
+
+Evolution data generated from [PokeAPI](https://github.com/PokeAPI/pokeapi) — **BSD-3-Clause**.
 
 Pokémon is a trademark of Nintendo / Game Freak / The Pokémon Company. This project is unofficial and non-commercial. For funsies. 🫰

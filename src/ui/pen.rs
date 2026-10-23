@@ -302,26 +302,30 @@ pub(super) fn render_pen(
             slot.creature_name.to_uppercase()
         );
         // Row 2: show level + XP bar when in an active (XP-earning) state;
-        // just the level when Idle (no XP accrues while Idle).
+        // just the level when Idle, to keep the wandering nameplate compact.
         let level_display = {
-            let threshold = 50 * slot.level;
+            let threshold = crate::creature::xp_to_next_level(slot.level);
             let filled = (slot.xp * 8)
                 .checked_div(threshold)
                 .map_or(0, |f| f.min(8) as usize);
             let bar: String = "▓".repeat(filled) + &"░".repeat(8 - filled);
+            let lv = if slot.ready_to_evolve() {
+                format!("Lv.{} ✨", slot.level)
+            } else {
+                format!("Lv.{}", slot.level)
+            };
             match slot.animator.state() {
-                AnimationState::Idle => format!("Lv.{}", slot.level),
-                AnimationState::Eating => format!("Lv.{} [{}] 🍖", slot.level, bar),
-                AnimationState::Sleeping => format!("Lv.{} [{}] 💤", slot.level, bar),
-                AnimationState::Playing => format!("Lv.{} [{}] 🧸", slot.level, bar),
+                AnimationState::Idle => lv,
+                AnimationState::Eating => format!("{lv} [{bar}] 🍖"),
+                AnimationState::Sleeping => format!("{lv} [{bar}] 💤"),
+                AnimationState::Playing => format!("{lv} [{bar}] 🧸"),
             }
         };
 
-        // Auto-size width to content, clamped to [8, SPRITE_W].
-        let content_w = name_display
-            .chars()
-            .count()
-            .max(level_display.chars().count()) as u16;
+        // Auto-size width to content, clamped to [8, SPRITE_W]. Display width,
+        // not char count: the emoji are two cells wide.
+        let display_w = |s: &str| ratatui::text::Line::from(s).width();
+        let content_w = display_w(&name_display).max(display_w(&level_display)) as u16;
         let label_w = (content_w + 2).clamp(8, SPRITE_W); // +2 for left/right borders
 
         // Center under the actual rendered sprite width, not the full cell area.

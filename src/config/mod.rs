@@ -270,9 +270,17 @@ impl GameConfig {
     }
 
     /// Create a GameConfig from a single creature name (CLI override).
+    ///
+    /// No save is read, so only species selectable without unlocks are allowed.
     pub fn from_creature_name(name: &str) -> Result<Self, ConfigError> {
         let creature = creatures::find_by_name(name)
             .ok_or_else(|| ConfigError::Validation(format!("Unknown creature: '{name}'")))?;
+        if !crate::evolutions::is_selectable(creature.id, &[]) {
+            return Err(ConfigError::Validation(format!(
+                "{} is locked. Evolve one to unlock it.",
+                creature.name
+            )));
+        }
         Ok(Self {
             scale: 3,
             roster: vec![RosterSlot {
@@ -646,6 +654,14 @@ creatures = ["missingno"]
     fn test_from_creature_name_unknown() {
         let result = GameConfig::from_creature_name("missingno");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_creature_name_respects_the_selection_lock() {
+        let locked = GameConfig::from_creature_name("charizard");
+        assert!(locked.unwrap_err().to_string().contains("locked"));
+        assert!(GameConfig::from_creature_name("snorlax").is_ok()); // evolves from a baby
+        assert!(GameConfig::from_creature_name("vaporeon").is_ok()); // temporarily selectable
     }
 
     #[test]

@@ -22,65 +22,9 @@ pub fn padded_id(id: u32) -> String {
     format!("{id:04}")
 }
 
-/// Default selectable creatures available in PoCLImon.
-///
-/// IDs correspond to National Pokédex numbers. Sprites are sourced from
-/// the PMDCollab SpriteCollab repository and cached locally on first use.
-/// Not to be confused with the user's active session roster (`App::slots`).
-pub const DEFAULT_CREATURES: &[CreatureDef] = &[
-    // Gen 1 starters
-    CreatureDef {
-        id: 1,
-        name: "Bulbasaur",
-    },
-    CreatureDef {
-        id: 4,
-        name: "Charmander",
-    },
-    CreatureDef {
-        id: 7,
-        name: "Squirtle",
-    },
-    // Electric mouse
-    CreatureDef {
-        id: 25,
-        name: "Pikachu",
-    },
-    // Eevee and its evolutions
-    CreatureDef {
-        id: 133,
-        name: "Eevee",
-    },
-    CreatureDef {
-        id: 134,
-        name: "Vaporeon",
-    },
-    CreatureDef {
-        id: 135,
-        name: "Jolteon",
-    },
-    CreatureDef {
-        id: 136,
-        name: "Flareon",
-    },
-    // Legendary birds
-    CreatureDef {
-        id: 144,
-        name: "Articuno",
-    },
-    CreatureDef {
-        id: 145,
-        name: "Zapdos",
-    },
-    CreatureDef {
-        id: 146,
-        name: "Moltres",
-    },
-];
-
 /// Find any Pokémon (Gen 1–9) by National Dex ID.
 ///
-/// Searches `FULL_DEX`, not just `DEFAULT_CREATURES`: Add/Swap accept every
+/// Searches all of `FULL_DEX`, not just a starter list: Add/Swap accept every
 /// species, so loading a saved roster must too.
 pub fn find_by_id(id: u32) -> Option<CreatureDef> {
     lookup_name(id).map(|name| CreatureDef { id, name })
@@ -1146,11 +1090,6 @@ pub fn find_by_name(name: &str) -> Option<CreatureDef> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_default_creatures_has_eleven_entries() {
-        assert_eq!(DEFAULT_CREATURES.len(), 11);
-    }
 
     #[test]
     fn test_original_five_present() {

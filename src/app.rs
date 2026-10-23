@@ -345,23 +345,41 @@ impl App {
     /// `self.slots` and `self.notifications` mutably at the same time, so
     /// level-up events are collected first and emitted after the slot loop.
     pub fn tick_xp(&mut self) {
-        let mut level_up_events: Vec<(String, u32)> = Vec::new();
+        let mut level_up_events: Vec<(String, u32, bool)> = Vec::new();
 
         for slot in &mut self.slots {
+            let was_ready = slot.ready_to_evolve();
             if let Some(new_level) = slot.tick_xp() {
-                level_up_events.push((slot.creature_name.clone(), new_level));
+                let became_ready = !was_ready && slot.ready_to_evolve();
+                level_up_events.push((slot.creature_name.clone(), new_level, became_ready));
             }
         }
 
         let leveled_up = !level_up_events.is_empty();
-        for (name, level) in level_up_events {
+        for (name, level, became_ready) in level_up_events {
             self.notify(
                 NotifLevel::Info,
                 format!("{name} leveled up! Now level {level} ✨"),
             );
+            if became_ready {
+                self.notify(NotifLevel::Info, format!("✨ {name} is ready to evolve!"));
+            }
         }
         if leveled_up {
             self.save_roster();
+        }
+    }
+
+    /// On startup, mention creatures that are already past an evolution level.
+    pub fn announce_ready_to_evolve(&mut self) {
+        let ready: Vec<String> = self
+            .slots
+            .iter()
+            .filter(|s| s.ready_to_evolve())
+            .map(|s| s.creature_name.clone())
+            .collect();
+        for name in ready {
+            self.notify(NotifLevel::Info, format!("✨ {name} is ready to evolve!"));
         }
     }
 
@@ -540,6 +558,23 @@ impl App {
         }
     }
 
+    /// The name of species `id` if the player may add or swap it in;
+    /// otherwise notifies why not (unknown, or locked until evolved into).
+    fn selectable_name(&mut self, id: u32) -> Option<&'static str> {
+        let Some(name) = crate::creatures::lookup_name(id) else {
+            self.notify(NotifLevel::Warn, format!("#{id} is not a known Pokémon"));
+            return None;
+        };
+        if !crate::evolutions::is_selectable(id, &self.config.unlocked) {
+            self.notify(
+                NotifLevel::Warn,
+                format!("#{id} {name} is locked. Evolve one to unlock it."),
+            );
+            return None;
+        }
+        Some(name)
+    }
+
     /// Add a creature by National Pokédex number.
     /// Looks up the name from FULL_DEX, then starts a background sprite load.
     pub fn add_creature_by_dex(&mut self, id: u32) {
@@ -547,8 +582,7 @@ impl App {
             self.notify(NotifLevel::Warn, "Pen is full — remove a creature first");
             return;
         }
-        let Some(name) = crate::creatures::lookup_name(id) else {
-            self.notify(NotifLevel::Warn, format!("#{id} is not a known Pokémon"));
+        let Some(name) = self.selectable_name(id) else {
             return;
         };
         let target_name = name.to_string();
@@ -581,8 +615,7 @@ impl App {
 
     /// Swap the selected creature to a new Pokémon by National Pokédex number.
     pub fn swap_selected_to_dex(&mut self, id: u32) {
-        let Some(name) = crate::creatures::lookup_name(id) else {
-            self.notify(NotifLevel::Warn, format!("#{id} is not a known Pokémon"));
+        let Some(name) = self.selectable_name(id) else {
             return;
         };
         let selected_index = self.selected;
@@ -759,5 +792,51 @@ mod tests {
         assert_eq!(slot.creature_id, 151);
         assert_eq!((slot.pos_x, slot.pos_y), (30.0, 4.0));
         assert!(slot.position_initialized);
+    }
+
+    #[test]
+    fn locked_species_cannot_be_added_or_swapped_in() {
+        let mut app = App::new(GameConfig::default(), None);
+        app.add_creature_by_dex(26); // Raichu
+        app.swap_selected_to_dex(2); // Ivysaur
+        assert!(app.add_transition.is_none() && app.swap_transition.is_none());
+        let locked: Vec<_> = app
+            .notifications
+            .iter()
+            .filter(|n| n.message.contains("is locked"))
+            .collect();
+        assert_eq!(locked.len(), 2);
+        assert!(locked[0].message.starts_with("#26 Raichu"));
+    }
+
+    #[test]
+    fn unlocked_species_can_be_swapped_in() {
+        let config = GameConfig {
+            unlocked: vec![2],
+            ..GameConfig::default()
+        };
+        let mut app = App::new(config, None);
+        app.swap_selected_to_dex(2);
+        assert!(app.swap_transition.is_some());
+    }
+
+    #[test]
+    fn reaching_an_evolution_level_is_announced_once() {
+        let mut app = App::new(GameConfig::default(), None);
+        app.selected = 0; // Bulbasaur evolves at 16
+        app.slots[0].level = 15;
+        app.slots[0].xp = crate::creature::xp_to_next_level(15) - 1;
+        app.slots[0].xp_milli = 999;
+
+        app.tick_xp();
+        app.tick_xp();
+
+        assert_eq!(app.slots[0].level, 16);
+        let ready = app
+            .notifications
+            .iter()
+            .filter(|n| n.message == "✨ Bulbasaur is ready to evolve!")
+            .count();
+        assert_eq!(ready, 1);
     }
 }
