@@ -30,9 +30,9 @@ pub struct App {
     pub swap_transition: Option<SwapTransition>,
     pub add_transition: Option<AddTransition>,
     /// Background sprite loads kicked off at startup — one per initial roster slot.
-    /// Each entry is (slot_index, expected_creature_id, receiver). The creature_id
+    /// Each entry is (slot_id, expected_creature_id, receiver). The creature_id
     /// guard discards results if the slot was swapped before the load finished.
-    pub startup_loads: Vec<(usize, u32, mpsc::Receiver<SwapWorkerResult>)>,
+    pub startup_loads: Vec<(u64, u32, mpsc::Receiver<SwapWorkerResult>)>,
     /// The poke-doll sprite image, decoded once from the bundled PNG at startup.
     pub toy_image: image::DynamicImage,
     /// Encoded `Protocol` for the poke-doll, cached and re-encoded only when the
@@ -196,7 +196,7 @@ impl App {
     /// them in order, keeping the receiver alive until the thread exits.
     pub fn start_background_loads(&mut self) {
         let scale = self.config.scale;
-        for (idx, slot) in self.slots.iter().enumerate() {
+        for slot in &self.slots {
             let id = slot.creature_id;
             let name = slot.creature_name.clone();
             let encoder = self.encoder.clone();
@@ -238,7 +238,7 @@ impl App {
                 }
                 // tx dropped here → Disconnected signals receiver to stop.
             });
-            self.startup_loads.push((idx, id, rx));
+            self.startup_loads.push((slot.slot_id, id, rx));
         }
     }
 
@@ -247,55 +247,43 @@ impl App {
     /// Keeps each receiver alive until the sending thread exits (Disconnected),
     /// so that Phase 1 and Phase 2 results are both received and applied.
     fn update_startup_loads(&mut self) {
-        let mut completions: Vec<(usize, u32, SwapWorkerResult)> = Vec::new();
+        let mut completions: Vec<(u64, u32, SwapWorkerResult)> = Vec::new();
         self.startup_loads
-            .retain(|(slot_index, creature_id, rx)| match rx.try_recv() {
+            .retain(|(slot_id, creature_id, rx)| match rx.try_recv() {
                 Ok(result) => {
-                    completions.push((*slot_index, *creature_id, result));
+                    completions.push((*slot_id, *creature_id, result));
                     true // Keep until Disconnected — Phase 2 may send another message.
                 }
                 Err(mpsc::TryRecvError::Empty) => true,
                 Err(mpsc::TryRecvError::Disconnected) => false,
             });
-        for (slot_index, expected_id, result) in completions {
+        for (slot_id, expected_id, result) in completions {
+            // Look the slot up by id: removals shift indices while loads are in flight.
+            let slot_index = self.slots.iter().position(|s| s.slot_id == slot_id);
             match result {
-                SwapWorkerResult::Loaded { mut slot, warnings } => {
-                    if slot_index >= self.slots.len() {
-                        continue;
-                    }
-                    let existing = &self.slots[slot_index];
+                SwapWorkerResult::Loaded { slot, warnings } => {
+                    let Some(slot_index) = slot_index else {
+                        continue; // Removed before the load finished.
+                    };
+                    let existing = &mut self.slots[slot_index];
                     // Discard if the slot was swapped to a different creature.
                     if existing.creature_id != expected_id {
                         continue;
                     }
-                    // Preserve physics so the creature doesn't teleport.
-                    slot.pos_x = existing.pos_x;
-                    slot.pos_y = existing.pos_y;
-                    slot.vel_x = existing.vel_x;
-                    slot.vel_y = existing.vel_y;
-                    slot.current_dir = existing.current_dir;
-                    slot.dir_hold_ticks = existing.dir_hold_ticks;
-                    slot.pause_ticks = existing.pause_ticks;
-                    slot.pause_face_down = existing.pause_face_down;
-                    slot.dir_cooldown_ticks = existing.dir_cooldown_ticks;
-                    // Preserve initialized flag so render_pen doesn't re-randomize position.
-                    slot.position_initialized = existing.position_initialized;
-                    // Preserve persisted XP and level.
-                    slot.level = existing.level;
-                    slot.xp = existing.xp;
-                    slot.slot_id = existing.slot_id;
-                    let old_ids = std::mem::take(&mut self.slots[slot_index].sprites.kitty_ids);
-                    self.slots[slot_index] = *slot;
+                    // Swap in only the new pixels and timings. Everything else
+                    // (position, current action, XP, level) stays as it is, so the
+                    // creature neither teleports nor drops what it was doing.
+                    let slot = *slot;
+                    let old_ids = std::mem::replace(&mut existing.sprites, slot.sprites).kitty_ids;
+                    existing.animator.adopt_timings(slot.animator);
                     self.retire_kitty_images(&old_ids);
                     for w in warnings {
                         self.notify(NotifLevel::Warn, w);
                     }
                 }
                 SwapWorkerResult::Failed(err) => {
-                    let name = self
-                        .slots
-                        .get(slot_index)
-                        .map(|s| s.creature_name.clone())
+                    let name = slot_index
+                        .map(|i| self.slots[i].creature_name.clone())
                         .unwrap_or_default();
                     self.notify(NotifLevel::Error, format!("Failed to load {name}: {err}"));
                 }
@@ -481,8 +469,10 @@ impl App {
             }
         }
 
-        if let Some((slot_index, slot)) = apply_swap {
+        if let Some((slot_index, mut slot)) = apply_swap {
             if slot_index < self.slots.len() {
+                // The newcomer appears where the recalled creature stood.
+                slot.take_motion_from(&self.slots[slot_index]);
                 let old_ids = std::mem::take(&mut self.slots[slot_index].sprites.kitty_ids);
                 self.slots[slot_index] = slot;
                 self.retire_kitty_images(&old_ids);
@@ -684,5 +674,90 @@ mod tests {
                 .any(|n| matches!(n.level, NotifLevel::Error)),
             "save failure was swallowed silently"
         );
+    }
+
+    use crate::animation::{AnimationState, Animator};
+    use std::sync::Arc;
+
+    /// A loader result for `like`'s creature carrying a 1-frame Idle sprite,
+    /// so tests can tell whether it was applied.
+    fn loaded_result(like: &CreatureSlot) -> SwapWorkerResult {
+        let mut slot = CreatureSlot::new(like.creature_id, like.creature_name.clone());
+        slot.sprites.idle[0] = vec![Arc::new(image::DynamicImage::new_rgba8(1, 1))];
+        slot.animator = Animator::new();
+        SwapWorkerResult::Loaded {
+            slot: Box::new(slot),
+            warnings: Vec::new(),
+        }
+    }
+
+    /// Register a fake in-flight startup load for slot `index` and return its sender.
+    fn fake_load(app: &mut App, index: usize) -> mpsc::Sender<SwapWorkerResult> {
+        let (tx, rx) = mpsc::channel();
+        let slot = &app.slots[index];
+        app.startup_loads.push((slot.slot_id, slot.creature_id, rx));
+        tx
+    }
+
+    #[test]
+    fn startup_load_lands_on_its_slot_after_an_earlier_removal() {
+        let mut app = App::new(GameConfig::default(), None);
+        let tx = fake_load(&mut app, 2);
+        let target_id = app.slots[2].slot_id;
+        let result = loaded_result(&app.slots[2]);
+
+        app.select_slot(0);
+        app.remove_selected();
+        tx.send(result).unwrap();
+        app.update_startup_loads();
+
+        let target = app.slots.iter().find(|s| s.slot_id == target_id).unwrap();
+        assert_eq!(target.sprites.idle[0].len(), 1, "load was dropped");
+        // The slot that moved into index 2 must not receive it either.
+        assert!(app.slots[2].sprites.idle[0].is_empty());
+    }
+
+    #[test]
+    fn startup_load_keeps_current_action_and_progress() {
+        let mut app = App::new(GameConfig::default(), None);
+        let tx = fake_load(&mut app, 0);
+        app.select_slot(0);
+        app.set_selected_state(AnimationState::Eating);
+        app.slots[0].xp = 7;
+        app.slots[0].pos_x = 12.0;
+
+        tx.send(loaded_result(&app.slots[0])).unwrap();
+        app.update_startup_loads();
+
+        let slot = &app.slots[0];
+        assert_eq!(slot.animator.state(), AnimationState::Eating);
+        assert_eq!(slot.xp, 7);
+        assert_eq!(slot.pos_x, 12.0);
+        assert_eq!(slot.sprites.idle[0].len(), 1);
+    }
+
+    #[test]
+    fn swap_keeps_the_position_of_the_recalled_creature() {
+        let mut app = App::new(GameConfig::default(), None);
+        app.slots[1].pos_x = 30.0;
+        app.slots[1].pos_y = 4.0;
+        app.slots[1].position_initialized = true;
+        let (tx, rx) = mpsc::channel();
+        app.swap_transition = Some(SwapTransition {
+            slot_index: 1,
+            recall_ticks: 0,
+            target_name: "Mew".to_string(),
+            worker_rx: rx,
+            worker_result: None,
+        });
+
+        let newcomer = CreatureSlot::new(151, "Mew".to_string());
+        tx.send(loaded_result(&newcomer)).unwrap();
+        app.update_swap_transition();
+
+        let slot = &app.slots[1];
+        assert_eq!(slot.creature_id, 151);
+        assert_eq!((slot.pos_x, slot.pos_y), (30.0, 4.0));
+        assert!(slot.position_initialized);
     }
 }
