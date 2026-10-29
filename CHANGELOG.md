@@ -9,6 +9,9 @@ for the diff.
 
 ## [Unreleased]
 
+### Fixed
+- Hopping creatures stay whole mid-jump instead of vanishing out of their sprite box.
+
 ## Earlier releases
 
 Notes for v0.6.3 and before are on the
