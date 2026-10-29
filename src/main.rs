@@ -43,38 +43,35 @@ const TICK: Duration = Duration::from_millis(50);
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Cli::parse();
 
-    let (config, save_path): (GameConfig, Option<PathBuf>) = if let Some(name) = &args.creature {
-        // Quick override — single creature, no persistence.
-        let cfg = match GameConfig::from_creature_name(name) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("Warning: {e} — using default");
-                GameConfig::default()
+    let (config, save_path, notice): (GameConfig, Option<PathBuf>, Option<String>) =
+        if let Some(name) = &args.creature {
+            // Quick override — single creature, no persistence.
+            let cfg = match GameConfig::from_creature_name(name) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Warning: {e} — using default");
+                    GameConfig::default()
+                }
+            };
+            (cfg, None, None)
+        } else {
+            let path = args.config.unwrap_or_else(config::default_config_path);
+            // Never fall back to defaults here: the next save would overwrite
+            // the progress we failed to read.
+            match GameConfig::load_game(&path) {
+                Ok(game) => (game.config, Some(game.save_path), game.notice),
+                Err(e) => {
+                    eprintln!(
+                        "Error: couldn't load {}: {e}\n\
+                         Your files were left untouched. Fix the file, or move it \
+                         aside to start over.\n\
+                         (`poclimon --creature pikachu` runs without reading it.)",
+                        path.display()
+                    );
+                    std::process::exit(1);
+                }
             }
         };
-        (cfg, None)
-    } else if let Some(path) = args.config {
-        let cfg = GameConfig::load(&path)?;
-        (cfg, Some(path))
-    } else {
-        let path = config::default_config_path();
-        // Never fall back to defaults here: the next save would overwrite the
-        // roster in the file we failed to read.
-        let cfg = match GameConfig::load_or_create(&path) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!(
-                    "Error: couldn't load {}: {e}\n\
-                     Your saved roster was left untouched. Fix the file, or move it \
-                     aside to start a new roster.\n\
-                     (`poclimon --creature pikachu` runs without reading it.)",
-                    path.display()
-                );
-                std::process::exit(1);
-            }
-        };
-        (cfg, Some(path))
-    };
 
     install_panic_hook();
     enable_raw_mode()?;
@@ -108,6 +105,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut app = App::new(config, save_path);
+    if let Some(notice) = notice {
+        app.notify(notification::NotifLevel::Warn, notice);
+    }
     app.is_tmux = picker.tmux_detected();
     app.encoder = Some(sprite_loading::SpriteEncoder::new(&picker));
 

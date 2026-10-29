@@ -1,3 +1,5 @@
+pub mod save;
+
 use crate::creature::CreatureSlot;
 use crate::creatures;
 use serde::{Deserialize, Serialize};
@@ -28,7 +30,7 @@ pub enum ConfigError {
 }
 
 /// A single slot entry in the new `[[slot]]` TOML format.
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct SlotEntry {
     pub id: u32,
     pub slot_id: u64,
@@ -44,8 +46,9 @@ pub struct SlotEntry {
 pub struct TomlConfig {
     #[serde(default)]
     pub display: DisplayConfig,
+    /// Legacy (pre-0.4) roster. `None` when the file has no `[roster]` table.
     #[serde(default)]
-    pub roster: RosterConfig,
+    pub roster: Option<RosterConfig>,
     /// New-format slot entries. When non-empty, these take precedence over
     /// `roster.creatures`.
     #[serde(default)]
@@ -108,6 +111,8 @@ pub struct GameConfig {
     pub scale: u32,
     /// Active roster entries.
     pub roster: Vec<RosterSlot>,
+    /// Species unlocked beyond the base forms (signed with the save).
+    pub unlocked: Vec<u32>,
 }
 
 impl Default for GameConfig {
@@ -151,31 +156,103 @@ impl Default for GameConfig {
                     xp: 0,
                 },
             ],
+            unlocked: Vec::new(),
         }
     }
 }
 
 impl GameConfig {
-    /// Load and validate config from a TOML file.
+    /// Load and validate a legacy-format config file (tests only; see `load_game`).
+    #[cfg(test)]
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
         let content = fs::read_to_string(path)?;
         let toml_config: TomlConfig = toml::from_str(&repair_oversized_slot_ids(&content))?;
         Self::from_toml(toml_config)
     }
 
-    /// Load `path`, or create it with the default roster if it doesn't exist.
+    /// Load settings from `settings_path` and progress from the signed save
+    /// next to it (see [`save::save_path_for`]), creating either if missing.
     ///
-    /// A file that exists but fails to read, parse or validate is an error and
-    /// is left untouched: callers must not fall back to defaults and keep the
-    /// path, or the next save would overwrite the user's roster.
-    pub fn load_or_create(path: &Path) -> Result<Self, ConfigError> {
-        if path.exists() {
-            return Self::load(path);
+    /// A settings file that exists but can't be read or parsed is an error and
+    /// is left untouched. A save that fails verification is moved aside and
+    /// replaced by its backup (or a new game); the returned notice says so.
+    ///
+    /// Legacy rosters in the settings file (`[[slot]]` / `[roster]`, ≤0.5.x)
+    /// are imported once, only if no save has ever existed, so a hand-made
+    /// "legacy" file can't be used to launder edits into a signed save.
+    pub fn load_game(settings_path: &Path) -> Result<LoadedGame, ConfigError> {
+        let save_path = save::save_path_for(settings_path);
+        let settings: TomlConfig = if settings_path.exists() {
+            let content = fs::read_to_string(settings_path)?;
+            toml::from_str(&repair_oversized_slot_ids(&content))?
+        } else {
+            write_atomic(settings_path, &render_settings(default_scale()))?;
+            TomlConfig::default()
+        };
+        let scale = clamp_scale(settings.display.scale);
+        let has_legacy = !settings.slot.is_empty() || settings.roster.is_some();
+
+        let from_save = |data: save::SaveData| -> Result<Self, ConfigError> {
+            if data.slot.is_empty() {
+                return Ok(Self::default());
+            }
+            let mut config = Self::from_toml(TomlConfig {
+                slot: data.slot,
+                ..TomlConfig::default()
+            })?;
+            config.unlocked = data.progress.unlocked;
+            Ok(config)
+        };
+
+        let mut notice = None;
+        let mut needs_write = false;
+        let mut config = match save::load(&save_path) {
+            save::LoadOutcome::Loaded(data) => from_save(data)?,
+            save::LoadOutcome::Restored(data, problem) => {
+                notice = Some(problem_notice(problem, true));
+                needs_write = true;
+                from_save(data)?
+            }
+            save::LoadOutcome::Lost(problem) => {
+                notice = Some(problem_notice(problem, false));
+                needs_write = true;
+                Self::default()
+            }
+            save::LoadOutcome::Missing { first_ever: true } if has_legacy => {
+                let mut config = Self::from_toml(settings)?;
+                // Grandfather every species the player already has (#27).
+                config.unlocked = config.roster.iter().map(|r| r.creature_id).collect();
+                config.unlocked.sort_unstable();
+                config.unlocked.dedup();
+                notice = Some("Moved your roster into the new signed save file".to_string());
+                needs_write = true;
+                // Dev builds leave the real settings file alone so a release
+                // build can still import it.
+                if !save::is_dev_build() {
+                    write_atomic(settings_path, &render_settings(scale))?;
+                }
+                config
+            }
+            save::LoadOutcome::Missing { .. } => {
+                needs_write = true;
+                Self::default()
+            }
+        };
+        config.scale = scale;
+
+        if needs_write {
+            config.write_save(&save_path)?;
         }
-        // Write the same roster we play with, so the file the user discovers
-        // matches what's on screen.
-        let config = Self::default();
-        let entries: Vec<SlotEntry> = config
+        Ok(LoadedGame {
+            config,
+            save_path,
+            notice,
+        })
+    }
+
+    /// Sign and write this config's roster and unlocks to `save_path`.
+    fn write_save(&self, save_path: &Path) -> Result<(), ConfigError> {
+        let entries = self
             .roster
             .iter()
             .map(|r| SlotEntry {
@@ -186,8 +263,10 @@ impl GameConfig {
                 xp: r.xp,
             })
             .collect();
-        write_atomic(path, &render_toml(config.scale, &entries))?;
-        Ok(config)
+        save::write(
+            save_path,
+            &save::SaveData::new(entries, self.unlocked.clone()),
+        )
     }
 
     /// Create a GameConfig from a single creature name (CLI override).
@@ -203,6 +282,7 @@ impl GameConfig {
                 level: 1,
                 xp: 0,
             }],
+            unlocked: Vec::new(),
         })
     }
 
@@ -247,11 +327,15 @@ impl GameConfig {
             return Ok(Self {
                 scale: clamp_scale(toml.display.scale),
                 roster,
+                unlocked: Vec::new(),
             });
         }
 
         // Old format: fall back to `roster.creatures`.
-        let creatures = &toml.roster.creatures;
+        let creatures = &toml
+            .roster
+            .map(|r| r.creatures)
+            .unwrap_or_else(default_creatures);
 
         if creatures.len() > MAX_ACTIVE_CREATURES {
             return Err(ConfigError::Validation(format!(
@@ -302,14 +386,12 @@ impl GameConfig {
         Ok(Self {
             scale: clamp_scale(toml.display.scale),
             roster,
+            unlocked: Vec::new(),
         })
     }
 
-    /// Save the current roster state back to the TOML file.
-    ///
-    /// Writes the new `[[slot]]` format, preserving `[display]` settings.
-    /// Silently succeeds if there are no slots.
-    pub fn save(path: &Path, scale: u32, slots: &[&CreatureSlot]) -> Result<(), ConfigError> {
+    /// Sign and write the live roster and `unlocked` to the save at `path`.
+    pub fn save(path: &Path, slots: &[&CreatureSlot], unlocked: &[u32]) -> Result<(), ConfigError> {
         let slot_entries: Vec<SlotEntry> = slots
             .iter()
             .map(|s| SlotEntry {
@@ -320,10 +402,33 @@ impl GameConfig {
                 xp: s.xp,
             })
             .collect();
-
-        write_atomic(path, &render_toml(scale, &slot_entries))?;
-        Ok(())
+        save::write(path, &save::SaveData::new(slot_entries, unlocked.to_vec()))
     }
+}
+
+/// Settings and progress for a session, from [`GameConfig::load_game`].
+pub struct LoadedGame {
+    pub config: GameConfig,
+    /// Where progress is saved during play.
+    pub save_path: PathBuf,
+    /// Something the player should be told on start (restored backup, import).
+    pub notice: Option<String>,
+}
+
+/// Startup notice for a rejected save. Kept under ~65 chars so it fits the
+/// status panel of an 80-column terminal; the rejected file is kept as
+/// `<save>.rejected-<time>` (documented in the README).
+fn problem_notice(problem: save::Problem, restored: bool) -> String {
+    let what = match problem {
+        save::Problem::Tampered => "Save was edited outside PoCLImon",
+        save::Problem::Damaged => "Save file was damaged",
+    };
+    let then = if restored {
+        "loaded the backup instead"
+    } else {
+        "no usable backup, new game"
+    };
+    format!("{what}; {then}")
 }
 
 /// A random, non-zero slot id that fits in a TOML integer (i64).
@@ -379,23 +484,13 @@ fn clamp_scale(scale: u32) -> u32 {
     scale.clamp(MIN_SCALE, MAX_SCALE)
 }
 
-/// Build the config document: `[display]` plus one `[[slot]]` per entry, with
-/// no legacy `[roster]` section.
-fn render_toml(scale: u32, entries: &[SlotEntry]) -> String {
-    let mut out = String::new();
-    out.push_str("[display]\n");
-    out.push_str(&format!("scale = {}\n", scale));
-
-    for entry in entries {
-        out.push('\n');
-        out.push_str("[[slot]]\n");
-        out.push_str(&format!("id = {}\n", entry.id));
-        out.push_str(&format!("slot_id = {}\n", entry.slot_id));
-        out.push_str(&format!("name = \"{}\"\n", entry.name));
-        out.push_str(&format!("level = {}\n", entry.level));
-        out.push_str(&format!("xp = {}\n", entry.xp));
-    }
-    out
+/// The settings file. Progress lives in the signed save, not here.
+fn render_settings(scale: u32) -> String {
+    format!(
+        "# PoCLImon settings. Safe to edit; your Pokémon are in poclimon/save.toml.\n\
+         [display]\n\
+         scale = {scale}  # sprite size multiplier, {MIN_SCALE}-{MAX_SCALE}\n"
+    )
 }
 
 /// Replace `path` with `contents` so that a crash at any point leaves either
@@ -689,31 +784,103 @@ creatures = ["pikachu"]
     }
 
     #[test]
-    fn test_load_or_create_rejects_corrupt_file_and_leaves_it_untouched() {
+    fn test_load_game_rejects_corrupt_settings_and_leaves_them_untouched() {
         let dir = test_dir("corrupt");
         let path = dir.join("poclimon.toml");
         let broken = "[display]\nscale = 3\n\n[[slot]]\nid = 25\nslot_id = 1\nname = \"Pika";
         fs::write(&path, broken).unwrap();
 
-        let result = GameConfig::load_or_create(&path);
+        let result = GameConfig::load_game(&path);
 
         assert!(result.is_err(), "corrupt config must not load as defaults");
         assert_eq!(fs::read_to_string(&path).unwrap(), broken);
     }
 
+    fn ids(c: &GameConfig) -> Vec<u32> {
+        c.roster.iter().map(|r| r.creature_id).collect()
+    }
+
     #[test]
-    fn test_load_or_create_creates_missing_file() {
+    fn test_load_game_creates_settings_and_save() {
         let dir = test_dir("missing");
         let path = dir.join("nested").join("poclimon.toml");
 
-        let config = GameConfig::load_or_create(&path).unwrap();
+        let game = GameConfig::load_game(&path).unwrap();
 
         assert!(path.exists());
-        assert!(!config.roster.is_empty());
+        assert!(game.save_path.exists());
+        assert_eq!(game.config.roster.len(), 5);
+        assert!(game.notice.is_none());
         // What was written must load back to the same roster.
-        let reloaded = GameConfig::load(&path).unwrap();
-        let ids = |c: &GameConfig| c.roster.iter().map(|r| r.creature_id).collect::<Vec<_>>();
-        assert_eq!(ids(&reloaded), ids(&config));
+        let reloaded = GameConfig::load_game(&path).unwrap();
+        assert_eq!(ids(&reloaded.config), ids(&game.config));
+    }
+
+    const LEGACY: &str = "[display]\nscale = 2\n\n[[slot]]\nid = 25\nslot_id = 9\n\
+                          name = \"Pikachu\"\nlevel = 4\nxp = 10\n\n[[slot]]\nid = 25\n\
+                          slot_id = 8\nname = \"Pikachu\"\nlevel = 1\nxp = 0\n";
+
+    #[test]
+    fn test_legacy_roster_is_imported_and_grandfathered() {
+        let dir = test_dir("legacy");
+        let path = dir.join("poclimon.toml");
+        fs::write(&path, LEGACY).unwrap();
+
+        let game = GameConfig::load_game(&path).unwrap();
+
+        assert_eq!(ids(&game.config), vec![25, 25]);
+        assert_eq!(game.config.roster[0].level, 4);
+        assert_eq!(game.config.unlocked, vec![25]);
+        assert_eq!(game.config.scale, 2);
+        assert!(game.notice.is_some());
+        assert!(matches!(
+            save::load(&game.save_path),
+            save::LoadOutcome::Loaded(_)
+        ));
+        if save::is_dev_build() {
+            assert_eq!(fs::read_to_string(&path).unwrap(), LEGACY);
+        } else {
+            assert!(!fs::read_to_string(&path).unwrap().contains("[[slot]]"));
+        }
+    }
+
+    #[test]
+    fn test_legacy_import_refused_once_a_save_has_existed() {
+        let dir = test_dir("launder");
+        let path = dir.join("poclimon.toml");
+        let game = GameConfig::load_game(&path).unwrap();
+        // Player deletes the save and writes a "legacy" roster to launder levels.
+        fs::remove_file(&game.save_path).unwrap();
+        fs::write(&path, LEGACY).unwrap();
+
+        let again = GameConfig::load_game(&path).unwrap();
+
+        assert!(again.config.roster.iter().all(|r| r.level == 1));
+        assert_ne!(ids(&again.config), vec![25, 25]);
+    }
+
+    #[test]
+    fn test_tampered_save_restores_backup_with_notice() {
+        let dir = test_dir("tampered");
+        let path = dir.join("poclimon.toml");
+        let game = GameConfig::load_game(&path).unwrap();
+        let mut slot = CreatureSlot::new(4, "Charmander".to_string());
+        slot.level = 2;
+        GameConfig::save(&game.save_path, &[&slot], &[]).unwrap();
+        slot.level = 3;
+        GameConfig::save(&game.save_path, &[&slot], &[]).unwrap();
+        let text = fs::read_to_string(&game.save_path).unwrap();
+        fs::write(&game.save_path, text.replace("level = 3", "level = 50")).unwrap();
+
+        let again = GameConfig::load_game(&path).unwrap();
+
+        assert_eq!(again.config.roster[0].level, 2, "backup not restored");
+        let notice = again.notice.unwrap();
+        assert!(notice.contains("edited outside"));
+        assert!(
+            notice.chars().count() <= 65,
+            "notice too long for 80 columns: {notice}"
+        );
     }
 
     #[test]
@@ -745,13 +912,16 @@ creatures = ["pikachu"]
         slot.level = 4;
         slot.xp = 17;
 
-        GameConfig::save(&path, 3, &[&slot]).unwrap();
-        let config = GameConfig::load(&path).unwrap();
+        GameConfig::save(&path, &[&slot], &[25]).unwrap();
+        let save::LoadOutcome::Loaded(data) = save::load(&path) else {
+            panic!("save didn't verify");
+        };
 
-        assert_eq!(config.roster.len(), 1);
-        assert_eq!(config.roster[0].slot_id, 42);
-        assert_eq!(config.roster[0].level, 4);
-        assert_eq!(config.roster[0].xp, 17);
+        assert_eq!(data.slot.len(), 1);
+        assert_eq!(data.slot[0].slot_id, 42);
+        assert_eq!(data.slot[0].level, 4);
+        assert_eq!(data.slot[0].xp, 17);
+        assert_eq!(data.progress.unlocked, vec![25]);
     }
 
     #[test]
