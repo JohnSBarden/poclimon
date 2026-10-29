@@ -1,5 +1,9 @@
 name: Release
 
+# Runs when develop is merged into main. Feature work lands on develop first, so
+# one merge to main ships everything collected under "## [Unreleased]" in
+# CHANGELOG.md as a single release.
+
 on:
   push:
     branches: [main]
@@ -32,6 +36,15 @@ jobs:
         id: bump
         shell: bash
         run: |
+          # Release only when the changelog has something to ship, so merging
+          # CI/docs-only changes into main doesn't cut an empty release.
+          UNRELEASED=$(awk '/^## \[Unreleased\]/{f=1;next} /^## /{f=0} f' CHANGELOG.md \
+                       | grep -E '^[[:space:]]*[-*]' || true)
+          if [[ -z "$UNRELEASED" ]]; then
+            echo "No entries under '## [Unreleased]' in CHANGELOG.md; skipping release"
+            echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
           LAST_TAG=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' \
                      --sort=-version:refname | head -1)
           [[ -z "$LAST_TAG" ]] && LAST_TAG=$(git rev-list --max-parents=0 HEAD)
@@ -73,16 +86,30 @@ jobs:
         if: steps.bump.outputs.skip != 'true'
         run: cargo generate-lockfile
 
+      - name: Stamp CHANGELOG.md
+        if: steps.bump.outputs.skip != 'true'
+        run: |
+          # Keep an empty Unreleased heading and move its entries under the new version.
+          sed -i "0,/^## \[Unreleased\]$/s//## [Unreleased]\n\n## [${{ steps.bump.outputs.new_tag }}] - $(date -u +%Y-%m-%d)/" CHANGELOG.md
+
       - name: Commit, tag, push
         if: steps.bump.outputs.skip != 'true'
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock
+          git add Cargo.toml Cargo.lock CHANGELOG.md
           git commit -m "chore(release): ${{ steps.bump.outputs.new_tag }} [skip ci]"
           git tag "${{ steps.bump.outputs.new_tag }}"
           git push origin main
           git push origin "${{ steps.bump.outputs.new_tag }}"
+
+      - name: Sync develop with the release commit
+        if: steps.bump.outputs.skip != 'true'
+        run: |
+          # Fast-forward only. If develop moved during the release, merge main
+          # into develop by hand before the next feature PR.
+          git push origin main:develop \
+            || echo "::warning::develop is not an ancestor of main; merge main into develop manually"
 
       - name: Publish to crates.io
         if: steps.bump.outputs.skip != 'true'
