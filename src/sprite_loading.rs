@@ -432,63 +432,36 @@ pub fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<Stri
     // Try to load "Hop" from PMDCollab. Falls back to Idle frames when missing,
     // following the exact same pattern as Eat/Sleep above.
     let hop_pre = decoded_sheets.get("Hop");
-    let (hop_down_raw, hop_timing_raw, _, _, hop_fallback) = load_and_scale_animation(
-        "Hop",
-        &sheets,
-        hop_pre,
-        &anim_infos,
-        scale,
-        Some((idle_w, idle_h)),
-        DIR_ROWS[0],
-    )?;
-    let (hop_frames_by_dir, hop_timing) = if hop_fallback {
+    // Hop frames are loaded uncropped and then fitted by `normalize_hop_frames`,
+    // which follows the creature up instead of center-cropping it out of view.
+    let load_hop = |dir_row| {
+        load_and_scale_animation("Hop", &sheets, hop_pre, &anim_infos, scale, None, dir_row)
+    };
+    let (hop_down_raw, hop_timing_raw, _, _, hop_fallback) = load_hop(DIR_ROWS[0])?;
+    let (hop_frames_by_dir, hop_lift, hop_timing) = if hop_fallback {
         // No Hop sheet — reuse Idle frames so Playing looks like a livelier Idle.
-        (slot.sprites.idle.clone(), idle_timing.clone())
-    } else {
-        let hop_left = load_and_scale_animation(
-            "Hop",
-            &sheets,
-            hop_pre,
-            &anim_infos,
-            scale,
-            Some((idle_w, idle_h)),
-            DIR_ROWS[1],
-        )
-        .map(|r| r.0)
-        .unwrap_or_else(|_| hop_down_raw.clone());
-        let hop_up = load_and_scale_animation(
-            "Hop",
-            &sheets,
-            hop_pre,
-            &anim_infos,
-            scale,
-            Some((idle_w, idle_h)),
-            DIR_ROWS[2],
-        )
-        .map(|r| r.0)
-        .unwrap_or_else(|_| hop_down_raw.clone());
-        let hop_right = load_and_scale_animation(
-            "Hop",
-            &sheets,
-            hop_pre,
-            &anim_infos,
-            scale,
-            Some((idle_w, idle_h)),
-            DIR_ROWS[3],
-        )
-        .map(|r| r.0)
-        .unwrap_or_else(|_| hop_down_raw.clone());
         (
-            [
-                to_arc_frames(hop_down_raw),
-                to_arc_frames(hop_left),
-                to_arc_frames(hop_up),
-                to_arc_frames(hop_right),
-            ],
+            slot.sprites.idle.clone(),
+            std::array::from_fn(|_| Vec::new()),
+            idle_timing.clone(),
+        )
+    } else {
+        let mut raw = [hop_down_raw.clone(), Vec::new(), Vec::new(), Vec::new()];
+        for (dir, frames) in raw.iter_mut().enumerate().skip(1) {
+            *frames = load_hop(DIR_ROWS[dir])
+                .map(|r| r.0)
+                .unwrap_or_else(|_| hop_down_raw.clone());
+        }
+        let fitted = raw.map(|frames| sprite_sheet::normalize_hop_frames(frames, idle_w, idle_h));
+        let lifts = std::array::from_fn(|dir| fitted[dir].1.clone());
+        (
+            fitted.map(|(frames, _)| to_arc_frames(frames)),
+            lifts,
             hop_timing_raw,
         )
     };
     slot.sprites.hop = hop_frames_by_dir;
+    slot.sprites.hop_lift = hop_lift;
 
     slot.animator = crate::animation::Animator::new();
     slot.animator
@@ -601,6 +574,7 @@ pub fn load_slot_idle_only(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<St
     slot.sprites.eat = slot.sprites.idle.clone();
     slot.sprites.sleep = slot.sprites.idle.clone();
     slot.sprites.hop = slot.sprites.idle.clone();
+    slot.sprites.hop_lift = std::array::from_fn(|_| Vec::new());
     slot.sprites.recall = slot.sprites.idle.clone();
 
     slot.animator = crate::animation::Animator::new();

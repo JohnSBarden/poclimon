@@ -314,6 +314,17 @@ pub(super) fn render_pen(
                 if let Some(protocol) =
                     sprites.encoded[picked_state][picked_dir][picked_frame].as_mut()
                 {
+                    // Hop frames are cropped to follow the creature up; raise
+                    // the sprite by as much so it still leaves the ground.
+                    let mut img_area = img_area;
+                    if picked_state == AnimationState::Playing.encoded_index() {
+                        let lift = sprites.hop_lift[picked_dir]
+                            .get(picked_frame)
+                            .copied()
+                            .unwrap_or(0.0);
+                        let rows = (lift * f32::from(protocol.size().height)).round() as u16;
+                        img_area.y = img_area.y.saturating_sub(rows).max(pen_inner.y);
+                    }
                     draw_image(f, protocol, img_area);
                     placements.extend(placement_at(f.buffer_mut(), img_area, protocol));
                 } else {
