@@ -8,7 +8,7 @@ This file gives Claude Code (and human contributors) the context needed to work 
 
 **poclimon** is a Rust TUI idle pet game. Pokémon live in your terminal — they eat, sleep, play, and accumulate XP. Built on [Ratatui](https://ratatui.rs/) and [ratatui-image](https://github.com/benjajaja/ratatui-image), it renders sprites via Kitty graphics, Sixel, iTerm2 inline, or Unicode halfblocks depending on what the terminal supports.
 
-- **Version:** see `Cargo.toml` (bumped automatically by the release workflow)
+- **Version:** see `Cargo.toml` (bumped automatically when `develop` is merged into `main`)
 - **Edition:** Rust 2024 (requires nightly or recent stable that ships 2024 edition support)
 - **Binary:** `poclimon` (single binary, no server, no daemon)
 
@@ -223,15 +223,41 @@ cd tools/term-harness && python3 run.py ../../target/release/poclimon kitty out/
 
 ---
 
+## Branching & releases
+
+**Every merge to `main` cuts a release** (version bump, tag, binaries, crates.io).
+To batch several features into one release, work goes through `develop`:
+
+1. Branch from `develop` (`feat/…`, `fix/…`, `perf/…`, `chore/…`); use conventional
+   commit subjects, since they pick the version bump.
+2. Add a line under `## [Unreleased]` in `CHANGELOG.md` (group under `### Added`,
+   `### Changed`, `### Fixed`, `### Removed`). Write it for players, not for the diff.
+3. Open the PR **against `develop`**, never `main`. CI fails the PR if
+   `CHANGELOG.md` wasn't touched, unless it has the `skip-changelog` label
+   (CI, refactors, docs).
+4. When the batch is ready to ship, open one PR `develop` → `main` and merge it
+   with a merge commit (not squash, so the `feat:` subjects reach the bump step).
+
+On that merge, `release.yml` bumps the version (`feat:` → minor, `BREAKING CHANGE`
+→ major, otherwise patch), renames `[Unreleased]` to `[vX.Y.Z] - date`, tags,
+fast-forwards `develop` to the release commit, and publishes. The GitHub
+Release body is that changelog section. A merge to `main` with an empty
+Unreleased section does **not** release.
+
+Hotfixes: branch from `main`, add the changelog entry, PR into `main` (releases
+immediately), then merge `main` back into `develop`.
+
+---
+
 ## CI/CD
 
 Three workflows in `.github/workflows/`:
 
 | Workflow | Trigger | Purpose |
 |---|---|---|
-| `ci.yml` | Push/PR | fmt, clippy, tests |
-| `release.yml` | Manual dispatch | Bumps version, tags, triggers build |
-| `build-release.yml` | `v*` tags | Builds multi-platform binaries, creates GitHub Release |
+| `ci.yml` | Push/PR to `main` or `develop` | fmt, clippy, tests; PRs into `develop` must touch `CHANGELOG.md` |
+| `release.yml` | Push to `main` | If `[Unreleased]` has entries: bumps version, stamps changelog, tags, syncs `develop`, publishes crate |
+| `build-release.yml` | `v*` tags | Builds multi-platform binaries, creates GitHub Release with the changelog section as notes |
 
 **Secrets required:**
 - `RELEASE_PAT` — PAT for pushing version commits
