@@ -44,10 +44,18 @@ build.rs           — Pre-renders the title art from assets/poclimon-title.png 
 ```
 
 **Data flow:**
-1. Config loaded from `~/.config/poclimon.toml` (or `--config`)
+1. Config loaded from `~/.config/poclimon.toml` (or `--config`). Created with the default roster if missing; if it exists but can't be loaded, poclimon exits with the error and leaves the file alone
 2. Creatures initialized from config slots; sprites loaded in background threads via `mpsc` channel
 3. Main loop: crossterm events → state updates → ratatui render
-4. On quit, creature state (XP, level, slot_id) persisted back to TOML config
+4. Creature state (XP, level, slot_id) is saved every 30 s, on level-up, on add/remove/swap, and on quit (`App::on_quit`)
+
+## Save-safety rules
+
+1. **Never fall back to defaults while keeping the save path.** A config that fails to load must not be overwritten; that is how rosters got wiped before 0.5.2.
+2. **Write the config with `config::write_atomic`** (temp file + fsync + rename), never `fs::write`.
+3. **Generate slot ids with `config::new_slot_id()`.** TOML integers are i64; u64 ids above `i64::MAX` save fine but fail to load. `load` repairs oversized ids written by ≤0.5.1.
+4. **Report save failures.** In-game they become an Error notification; on quit they go to stderr.
+5. The panic hook restores the terminal; Kitty images uploaded before a panic are not deleted.
 
 ---
 
@@ -127,7 +135,7 @@ scale = 3
 creatures = ["pikachu", "eevee"]
 ```
 
-Config is auto-migrated: legacy format is read, converted to slot format, and written back on quit.
+Config is auto-migrated: legacy format is read, converted to slot format, and written back on the next save. `[display] scale` is clamped to 1–8.
 
 ---
 
