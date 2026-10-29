@@ -36,7 +36,27 @@ fn http_agent() -> &'static ureq::Agent {
 }
 
 /// All animations loaded during the full (Phase 2) background load.
-const ALL_ANIMS: &[&str] = &["Idle", "Eat", "Sleep", "Spin", "Rotate", "Hop"];
+/// Rotate is fetched separately, and only when Spin is missing (see `download_sprites`).
+const ALL_ANIMS: &[&str] = &["Idle", "Eat", "Sleep", "Spin", "Hop"];
+
+/// How long a "this sheet doesn't exist upstream" marker is trusted before
+/// asking again, so sprites added to SpriteCollab later still get picked up.
+const MISSING_MARKER_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// Marker file recording that `dest` returned 404 upstream.
+fn missing_marker(dest: &Path) -> PathBuf {
+    dest.with_extension("missing")
+}
+
+/// Whether `marker` exists and is younger than [`MISSING_MARKER_TTL`].
+fn is_fresh_marker(marker: &Path) -> bool {
+    marker
+        .metadata()
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age < MISSING_MARKER_TTL)
+}
 
 /// Result type for [`download_all_sprites`]:
 /// `(anim_data_path, downloaded_sheets, warning_messages)`.
@@ -58,15 +78,28 @@ pub fn sprite_cache_dir(creature_id: u32) -> Result<PathBuf> {
 }
 
 /// Download a file from a URL to a local path.
-/// Skips download if the file already exists.
+/// Skips download if the file already exists, or if a recent request for it
+/// returned 404 (so missing sheets don't hit the network on every launch).
 fn download_file(url: &str, dest: &Path) -> Result<()> {
     if dest.exists() {
         return Ok(());
     }
+    let marker = missing_marker(dest);
+    if is_fresh_marker(&marker) {
+        anyhow::bail!("not available upstream (cached 404)");
+    }
 
     // Write atomically to avoid leaving partial files on interruption.
     let tmp = dest.with_extension("part");
-    let mut response = http_agent().get(url).call()?;
+    let mut response = match http_agent().get(url).call() {
+        Ok(response) => response,
+        Err(ureq::Error::StatusCode(404)) => {
+            // Only a definite 404 is cached; network errors retry next time.
+            let _ = std::fs::write(&marker, b"");
+            anyhow::bail!("not available upstream (404)");
+        }
+        Err(e) => return Err(e.into()),
+    };
     let bytes = response
         .body_mut()
         .with_config()
@@ -135,10 +168,73 @@ pub fn download_sprites(creature_id: u32, anims: &[&str]) -> Result<SpriteDownlo
         }
     }
 
+    // Rotate only stands in for a missing Spin as the recall animation.
+    if anims.contains(&"Spin") && !sheets.iter().any(|(name, _)| name == "Spin") {
+        let dest = cache_dir.join("Rotate-Anim.png");
+        let url = format!("{SPRITECOLLAB_BASE}/{pid}/Rotate-Anim.png");
+        match download_file(&url, &dest) {
+            Ok(()) => sheets.push(("Rotate".to_string(), dest)),
+            Err(e) => warnings.push(format!(
+                "Couldn't download Rotate for creature {creature_id}: {e}"
+            )),
+        }
+    }
+
     Ok((anim_data_path, sheets, warnings))
 }
 
 /// Download all animations needed for a full sprite load.
 pub fn download_all_sprites(creature_id: u32) -> Result<SpriteDownloadResult> {
     download_sprites(creature_id, ALL_ANIMS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::SystemTime;
+
+    /// Nothing listens on the discard port, so a real request fails fast.
+    const UNREACHABLE: &str = "http://127.0.0.1:9/Spin-Anim.png";
+
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("poclimon-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn fresh_missing_marker_skips_the_network() {
+        let dir = scratch_dir("fresh-marker");
+        let dest = dir.join("Spin-Anim.png");
+        std::fs::write(missing_marker(&dest), b"").unwrap();
+
+        let err = download_file(UNREACHABLE, &dest).unwrap_err();
+        assert!(err.to_string().contains("cached"), "went to network: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn expired_missing_marker_is_retried() {
+        let dir = scratch_dir("old-marker");
+        let dest = dir.join("Spin-Anim.png");
+        let marker = missing_marker(&dest);
+        let file = std::fs::File::create(&marker).unwrap();
+        let old = SystemTime::now() - MISSING_MARKER_TTL - Duration::from_secs(60);
+        file.set_modified(old).unwrap();
+
+        let err = download_file(UNREACHABLE, &dest).unwrap_err();
+        assert!(!err.to_string().contains("cached"), "marker never expired");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn network_errors_are_not_cached_as_missing() {
+        let dir = scratch_dir("net-error");
+        let dest = dir.join("Spin-Anim.png");
+
+        assert!(download_file(UNREACHABLE, &dest).is_err());
+        assert!(!missing_marker(&dest).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
