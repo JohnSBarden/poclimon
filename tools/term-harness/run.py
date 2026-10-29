@@ -114,6 +114,14 @@ SCRIPTS = {
     ],
     "soak": [("wait", 8.0, "startup"), ("key", "e", "feed"), ("key", RIGHT, None), ("key", "p", "play"),
              ("wait", 60.0, "soak 60s")],
+    # Needs a dev build and POCLIMON_XP_MULTIPLIER=500: feeding Bulbasaur
+    # (slot 3) for ~8 s passes Lv 16, then V evolves it into Ivysaur.
+    "evolve": [
+        ("wait", 8.0, "startup"),
+        ("key", "3", "select bulbasaur"), ("key", "e", "feed"), ("wait", 8.0, "level to 16+"),
+        ("key", "i", "idle"), ("key", "v", "evolve"), ("wait", 6.0, "flicker + apply"),
+        ("key", "v", "evolve again (Ivysaur not ready)"), ("wait", 4.0, "settle"),
+    ],
 }
 for step in SCRIPTS[a.script]:
     kind, arg, label = step

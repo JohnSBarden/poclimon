@@ -10,12 +10,55 @@ use crate::sprite_loading::{encode_all_frames, encode_toy_image, sprite_encode_r
 use rand::Rng;
 use ratatui::{
     Frame,
+    buffer::{Buffer, Cell},
     layout::Rect,
     style::{Color, Modifier, Style},
     text::Span,
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
 };
 use ratatui_image::{Image, picker::Picker, protocol::Protocol};
+
+/// Draw an encoded image. Halfblock images are drawn so their transparent
+/// pixels (marked `HALFBLOCK_CLEAR` at encode time) show what was beneath.
+fn draw_image(f: &mut Frame<'_>, protocol: &mut Protocol, area: Rect) {
+    if !matches!(protocol, Protocol::Halfblocks(_)) {
+        f.render_widget(Image::new(protocol), area);
+        return;
+    }
+    let area = area.intersection(f.area());
+    let beneath: Vec<Cell> = area
+        .positions()
+        .map(|p| f.buffer_mut()[p].clone())
+        .collect();
+    f.render_widget(Image::new(protocol), area);
+    restore_halfblock_transparency(f.buffer_mut(), area, &beneath);
+}
+
+/// After a halfblock image is drawn over `area`, rewrite cells that are
+/// wholly or half transparent: wholly → the cell that was beneath; half → just
+/// the opaque half, drawn over the background that was beneath.
+fn restore_halfblock_transparency(buf: &mut Buffer, area: Rect, beneath: &[Cell]) {
+    const CLEAR: Color = crate::sprite_loading::HALFBLOCK_CLEAR;
+    for (pos, under) in area.positions().zip(beneath) {
+        let cell = &mut buf[pos];
+        let (upper, lower) = match cell.symbol() {
+            "▀" => (cell.fg, cell.bg),
+            "▄" => (cell.bg, cell.fg),
+            " " => (cell.bg, cell.bg),
+            _ => continue,
+        };
+        match (upper == CLEAR, lower == CLEAR) {
+            (true, true) => *cell = under.clone(),
+            (true, false) => {
+                cell.set_symbol("▄").set_fg(lower).set_bg(under.bg);
+            }
+            (false, true) => {
+                cell.set_symbol("▀").set_fg(upper).set_bg(under.bg);
+            }
+            (false, false) => {}
+        }
+    }
+}
 
 fn sprite_render_pos(
     slot: &CreatureSlot,
@@ -106,6 +149,7 @@ pub(super) fn render_pen(
 
     let selected = app.selected;
     let transition_slot_index = app.transition_slot_index();
+    let evolving_slot_index = app.evolving_slot_index();
     let transition_state = app
         .swap_transition
         .as_ref()
@@ -240,19 +284,37 @@ pub(super) fn render_pen(
             continue;
         }
 
-        match pick_protocol_index(&slot.sprites.encoded, state_idx, dir_idx, frame_idx) {
+        // Evolution flicker: draw a white silhouette, of the old form or (once
+        // loaded) the new one. The new form's frames live in the transition
+        // until it's applied; uploads go through the same Kitty path.
+        let creature_id = slot.creature_id;
+        let mut sprites = &mut slot.sprites;
+        if evolving_slot_index == Some(i) {
+            state_idx = crate::creature::SILHOUETTE_STATE;
+            frame_idx = 0;
+            if let Some(evo) = app.evolution.as_mut()
+                && evo.shows_new_form()
+                && let Some(new) = evo.loaded_slot_mut()
+            {
+                sprites = &mut new.sprites;
+            }
+            // Silhouettes have transparent gaps; clear what was drawn before.
+            f.render_widget(Clear, img_area);
+        }
+
+        match pick_protocol_index(&sprites.encoded, state_idx, dir_idx, frame_idx) {
             Some((picked_state, picked_dir, picked_frame)) => {
-                if let Some(up) = slot.sprites.kitty_uploads[picked_state][picked_dir]
+                if let Some(up) = sprites.kitty_uploads[picked_state][picked_dir]
                     .get_mut(picked_frame)
                     .and_then(Option::take)
                 {
-                    slot.sprites.kitty_ids.push(up.id);
+                    sprites.kitty_ids.push(up.id);
                     uploads.push(up.seq);
                 }
                 if let Some(protocol) =
-                    slot.sprites.encoded[picked_state][picked_dir][picked_frame].as_mut()
+                    sprites.encoded[picked_state][picked_dir][picked_frame].as_mut()
                 {
-                    f.render_widget(Image::new(protocol), img_area);
+                    draw_image(f, protocol, img_area);
                     placements.extend(placement_at(f.buffer_mut(), img_area, protocol));
                 } else {
                     debug_log(format!(
@@ -269,14 +331,14 @@ pub(super) fn render_pen(
             None => {
                 debug_log(format!(
                     "protocol_miss id={} state={} dir={} frame={} lens=[{}/{}/{}/{}]",
-                    slot.creature_id,
+                    creature_id,
                     state_idx,
                     dir_idx,
                     frame_idx,
-                    slot.sprites.encoded[state_idx][0].len(),
-                    slot.sprites.encoded[state_idx][1].len(),
-                    slot.sprites.encoded[state_idx][2].len(),
-                    slot.sprites.encoded[state_idx][3].len()
+                    sprites.encoded[state_idx][0].len(),
+                    sprites.encoded[state_idx][1].len(),
+                    sprites.encoded[state_idx][2].len(),
+                    sprites.encoded[state_idx][3].len()
                 ));
                 f.render_widget(Clear, img_area);
                 f.render_widget(
@@ -302,26 +364,30 @@ pub(super) fn render_pen(
             slot.creature_name.to_uppercase()
         );
         // Row 2: show level + XP bar when in an active (XP-earning) state;
-        // just the level when Idle (no XP accrues while Idle).
+        // just the level when Idle, to keep the wandering nameplate compact.
         let level_display = {
-            let threshold = 50 * slot.level;
+            let threshold = crate::creature::xp_to_next_level(slot.level);
             let filled = (slot.xp * 8)
                 .checked_div(threshold)
                 .map_or(0, |f| f.min(8) as usize);
             let bar: String = "▓".repeat(filled) + &"░".repeat(8 - filled);
+            let lv = if slot.ready_to_evolve() {
+                format!("Lv.{} ✨", slot.level)
+            } else {
+                format!("Lv.{}", slot.level)
+            };
             match slot.animator.state() {
-                AnimationState::Idle => format!("Lv.{}", slot.level),
-                AnimationState::Eating => format!("Lv.{} [{}] 🍖", slot.level, bar),
-                AnimationState::Sleeping => format!("Lv.{} [{}] 💤", slot.level, bar),
-                AnimationState::Playing => format!("Lv.{} [{}] 🧸", slot.level, bar),
+                AnimationState::Idle => lv,
+                AnimationState::Eating => format!("{lv} [{bar}] 🍖"),
+                AnimationState::Sleeping => format!("{lv} [{bar}] 💤"),
+                AnimationState::Playing => format!("{lv} [{bar}] 🧸"),
             }
         };
 
-        // Auto-size width to content, clamped to [8, SPRITE_W].
-        let content_w = name_display
-            .chars()
-            .count()
-            .max(level_display.chars().count()) as u16;
+        // Auto-size width to content, clamped to [8, SPRITE_W]. Display width,
+        // not char count: the emoji are two cells wide.
+        let display_w = |s: &str| ratatui::text::Line::from(s).width();
+        let content_w = display_w(&name_display).max(display_w(&level_display)) as u16;
         let label_w = (content_w + 2).clamp(8, SPRITE_W); // +2 for left/right borders
 
         // Center under the actual rendered sprite width, not the full cell area.
@@ -428,7 +494,7 @@ pub(super) fn render_pen(
         }
         if let Some(proto) = app.toy_proto.as_mut() {
             let toy_area = Rect::new(toy_x as u16, toy_y as u16, TOY_W, toy_h);
-            f.render_widget(Image::new(proto), toy_area);
+            draw_image(f, proto, toy_area);
             placements.extend(placement_at(f.buffer_mut(), toy_area, proto));
         }
     }
@@ -442,9 +508,9 @@ pub(super) fn render_pen(
 /// 3) any direction in requested state
 /// 4) any direction in Idle state
 ///
-/// The array has 5 states: 0=Idle, 1=Eat, 2=Sleep, 3=Recall, 4=Playing (Hop).
+/// States: 0=Idle, 1=Eat, 2=Sleep, 3=Recall, 4=Playing (Hop), 5=Silhouette.
 fn pick_protocol_index(
-    encoded: &[[Vec<Option<Protocol>>; 4]; 5],
+    encoded: &[[Vec<Option<Protocol>>; 4]; crate::creature::ENCODED_STATES],
     state_idx: usize,
     dir_idx: usize,
     frame_idx: usize,
@@ -474,4 +540,45 @@ fn pick_protocol_index(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn halfblock_transparency_shows_what_is_beneath() {
+        // 2×4 px = 2×2 cells. Column 0: opaque red on top, transparent below.
+        // Column 1: transparent top pixel over a blue one, then transparent.
+        let red = image::Rgba([200, 0, 0, 255]);
+        let blue = image::Rgba([0, 0, 200, 255]);
+        let mut img = image::RgbaImage::new(2, 4);
+        img.put_pixel(0, 0, red);
+        img.put_pixel(0, 1, red);
+        img.put_pixel(1, 1, blue);
+        let area = Rect::new(0, 0, 2, 2);
+        let mut proto = crate::sprite_loading::halfblocks_keeping_transparency(img, area).unwrap();
+
+        let mut term = Terminal::new(TestBackend::new(2, 2)).unwrap();
+        term.draw(|f| {
+            let grass = Style::default().fg(Color::Green).bg(Color::Rgb(9, 9, 9));
+            f.render_widget(Paragraph::new("xx\nxx").style(grass), area);
+            draw_image(f, &mut proto, area);
+        })
+        .unwrap();
+        let buf = term.backend().buffer();
+
+        // Fully opaque cell: unchanged.
+        assert_eq!(buf[(0, 0)].bg, Color::Rgb(200, 0, 0));
+        // Top half transparent: only the lower half is drawn, over the grass bg.
+        assert_eq!(buf[(1, 0)].symbol(), "▄");
+        assert_eq!(buf[(1, 0)].fg, Color::Rgb(0, 0, 200));
+        assert_eq!(buf[(1, 0)].bg, Color::Rgb(9, 9, 9));
+        // Fully transparent row: the grass is back.
+        for x in 0..2 {
+            assert_eq!(buf[(x, 1)].symbol(), "x");
+            assert_eq!(buf[(x, 1)].fg, Color::Green);
+        }
+    }
 }

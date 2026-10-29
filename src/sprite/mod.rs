@@ -37,7 +37,7 @@ fn http_agent() -> &'static ureq::Agent {
 
 /// All animations loaded during the full (Phase 2) background load.
 /// Rotate is fetched separately, and only when Spin is missing (see `download_sprites`).
-const ALL_ANIMS: &[&str] = &["Idle", "Eat", "Sleep", "Spin"];
+const ALL_ANIMS: &[&str] = &["Idle", "Eat", "Sleep", "Spin", "Hop"];
 
 /// How long a "this sheet doesn't exist upstream" marker is trusted before
 /// asking again, so sprites added to SpriteCollab later still get picked up.

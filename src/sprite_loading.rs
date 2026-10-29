@@ -34,6 +34,43 @@ pub struct AddTransition {
     pub worker_result: Option<SwapWorkerResult>,
 }
 
+/// Length of the evolution flicker: 3 s of 50 ms ticks. It runs longer only
+/// if the new form's sprites are still loading.
+pub const EVOLVE_TICKS: u16 = 60;
+
+/// An evolution in progress: the new species loads in the background while
+/// the old and new silhouettes flicker, faster and faster.
+pub struct EvolutionTransition {
+    /// Identifies the evolving creature (indices shift if others are removed).
+    pub slot_id: u64,
+    pub from_name: String,
+    pub target_id: u32,
+    pub target_name: String,
+    /// Ticks since the evolution started.
+    pub elapsed_ticks: u16,
+    pub worker_rx: Receiver<SwapWorkerResult>,
+    pub worker_result: Option<SwapWorkerResult>,
+}
+
+impl EvolutionTransition {
+    /// The new form's loaded slot, once the worker has finished.
+    pub fn loaded_slot_mut(&mut self) -> Option<&mut CreatureSlot> {
+        match self.worker_result.as_mut() {
+            Some(SwapWorkerResult::Loaded { slot, .. }) => Some(slot),
+            _ => None,
+        }
+    }
+
+    /// Whether the flicker shows the new form this tick. Toggles at a rate
+    /// that grows with elapsed time (every ~10 ticks at first, every tick by
+    /// the end), and stays on the old form until the new one has loaded.
+    pub fn shows_new_form(&self) -> bool {
+        let t = u32::from(self.elapsed_ticks);
+        let loaded = matches!(self.worker_result, Some(SwapWorkerResult::Loaded { .. }));
+        loaded && (t * t / 90) % 2 == 1
+    }
+}
+
 /// Cap a frame list to at most `MAX_CACHED_FRAMES`, selecting evenly-spaced
 /// frames so the animation remains representative.
 pub fn cap_frames(
@@ -394,11 +431,11 @@ pub fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<Stri
     // ── Hop (Playing) animation ───────────────────────────────────────────────
     // Try to load "Hop" from PMDCollab. Falls back to Idle frames when missing,
     // following the exact same pattern as Eat/Sleep above.
-    // "Hop" is not in ALL_ANIMS so it's never downloaded; pre_decoded is None.
+    let hop_pre = decoded_sheets.get("Hop");
     let (hop_down_raw, hop_timing_raw, _, _, hop_fallback) = load_and_scale_animation(
         "Hop",
         &sheets,
-        None,
+        hop_pre,
         &anim_infos,
         scale,
         Some((idle_w, idle_h)),
@@ -411,7 +448,7 @@ pub fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<Stri
         let hop_left = load_and_scale_animation(
             "Hop",
             &sheets,
-            None,
+            hop_pre,
             &anim_infos,
             scale,
             Some((idle_w, idle_h)),
@@ -422,7 +459,7 @@ pub fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<Stri
         let hop_up = load_and_scale_animation(
             "Hop",
             &sheets,
-            None,
+            hop_pre,
             &anim_infos,
             scale,
             Some((idle_w, idle_h)),
@@ -433,7 +470,7 @@ pub fn load_slot_sprites(slot: &mut CreatureSlot, scale: u32) -> Result<Vec<Stri
         let hop_right = load_and_scale_animation(
             "Hop",
             &sheets,
-            None,
+            hop_pre,
             &anim_infos,
             scale,
             Some((idle_w, idle_h)),
@@ -711,9 +748,17 @@ pub fn encode_all_frames(slot: &mut CreatureSlot, picker: &Picker, area: ratatui
     let recall = slot.sprites.recall.clone();
     // Hop is the 5th state (index 4 = Playing).
     let hop = slot.sprites.hop.clone();
+    // Evolution silhouette: first Idle frame per direction, painted white.
+    let silhouette: [Vec<Arc<image::DynamicImage>>; 4] = std::array::from_fn(|d| {
+        idle[d]
+            .first()
+            .map(|img| vec![Arc::new(silhouette_of(img))])
+            .unwrap_or_default()
+    });
 
-    // 5 caches: Idle=0, Eat=1, Sleep=2, Recall=3, Playing/Hop=4.
-    let caches: [&[Vec<Arc<image::DynamicImage>>; 4]; 5] = [&idle, &eat, &sleep, &recall, &hop];
+    // Idle=0, Eat=1, Sleep=2, Recall=3, Playing/Hop=4, Silhouette=5.
+    let caches: [&[Vec<Arc<image::DynamicImage>>; 4]; crate::creature::ENCODED_STATES] =
+        [&idle, &eat, &sleep, &recall, &hop, &silhouette];
     let is_halfblocks = picker.protocol_type() == ratatui_image::picker::ProtocolType::Halfblocks;
 
     slot.sprites.encoded = std::array::from_fn(|state_idx| {
@@ -753,6 +798,20 @@ pub fn encode_all_frames(slot: &mut CreatureSlot, picker: &Picker, area: ratatui
                 .collect()
         })
     });
+}
+
+/// `img` with every visible pixel turned opaque white and the rest left
+/// transparent, for the evolution flicker.
+pub fn silhouette_of(img: &image::DynamicImage) -> image::DynamicImage {
+    let mut rgba = img.to_rgba8();
+    for p in rgba.pixels_mut() {
+        *p = if p[3] >= 128 {
+            image::Rgba([255, 255, 255, 255])
+        } else {
+            image::Rgba([0, 0, 0, 0])
+        };
+    }
+    image::DynamicImage::ImageRgba8(rgba)
 }
 
 /// Everything a background thread needs to encode sprite frames for display.
@@ -809,11 +868,9 @@ pub fn encode_toy_image(
         // Center the scaled image on a transparent canvas.
         let ox = pw.saturating_sub(scaled.width()) / 2;
         let oy = ph.saturating_sub(scaled.height()) / 2;
-        let mut canvas = image::DynamicImage::ImageRgba8(image::RgbaImage::new(pw, ph));
-        image::imageops::overlay(&mut canvas, &scaled, ox as i64, oy as i64);
-        ratatui_image::protocol::halfblocks::Halfblocks::new(canvas, area.as_size())
-            .ok()
-            .map(Protocol::Halfblocks)
+        let mut canvas = image::RgbaImage::new(pw, ph);
+        image::imageops::overlay(&mut canvas, &scaled.to_rgba8(), ox as i64, oy as i64);
+        halfblocks_keeping_transparency(canvas, area)
     } else {
         picker
             .new_protocol(
@@ -845,9 +902,79 @@ pub fn encode_halfblock_frame(
     let resized = img.resize(pw, ph, FilterType::Lanczos3);
     let ox = pw.saturating_sub(resized.width()) / 2;
     let oy = ph.saturating_sub(resized.height()) / 2;
-    let mut canvas = image::DynamicImage::ImageRgba8(image::RgbaImage::new(pw, ph));
-    image::imageops::overlay(&mut canvas, &resized, ox as i64, oy as i64);
-    ratatui_image::protocol::halfblocks::Halfblocks::new(canvas, area.as_size())
-        .ok()
-        .map(Protocol::Halfblocks)
+    let mut canvas = image::RgbaImage::new(pw, ph);
+    image::imageops::overlay(&mut canvas, &resized.to_rgba8(), ox as i64, oy as i64);
+    halfblocks_keeping_transparency(canvas, area)
+}
+
+/// Stand-in colour for transparent pixels in halfblock images.
+///
+/// ratatui-image's halfblock encoder drops alpha, so transparent pixels came
+/// out black and every sprite sat on a black box. Transparent pixels are
+/// painted this exact colour instead, and `ui::pen` puts back whatever was
+/// beneath after drawing (see `restore_halfblock_transparency`).
+pub const HALFBLOCK_CLEAR: ratatui::style::Color = ratatui::style::Color::Rgb(1, 2, 3);
+
+/// Encode a `pw × ph` canvas (already the exact halfblock pixel size, so the
+/// encoder's own resize changes nothing) with transparency marked.
+pub fn halfblocks_keeping_transparency(
+    canvas: image::RgbaImage,
+    area: ratatui::layout::Rect,
+) -> Option<Protocol> {
+    let rgb = image::RgbImage::from_fn(canvas.width(), canvas.height(), |x, y| {
+        let p = canvas.get_pixel(x, y);
+        match (p[3] < 128, [p[0], p[1], p[2]]) {
+            (true, _) => image::Rgb([1, 2, 3]),
+            // A real pixel that happens to match keeps its look but not the mark.
+            (false, [1, 2, 3]) => image::Rgb([1, 2, 4]),
+            (false, c) => image::Rgb(c),
+        }
+    });
+    ratatui_image::protocol::halfblocks::Halfblocks::new(
+        image::DynamicImage::ImageRgb8(rgb),
+        area.as_size(),
+    )
+    .ok()
+    .map(Protocol::Halfblocks)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn silhouette_is_white_where_opaque_and_clear_elsewhere() {
+        let mut img = image::RgbaImage::new(2, 1);
+        img.put_pixel(0, 0, image::Rgba([10, 200, 30, 255]));
+        img.put_pixel(1, 0, image::Rgba([10, 200, 30, 20]));
+        let s = silhouette_of(&image::DynamicImage::ImageRgba8(img)).to_rgba8();
+        assert_eq!(s.get_pixel(0, 0), &image::Rgba([255, 255, 255, 255]));
+        assert_eq!(s.get_pixel(1, 0)[3], 0);
+    }
+
+    #[test]
+    fn encoding_adds_one_silhouette_per_direction() {
+        let mut slot = CreatureSlot::new(1, "Bulbasaur".to_string());
+        let frame = Arc::new(image::DynamicImage::ImageRgba8(image::RgbaImage::new(8, 8)));
+        slot.sprites.idle = std::array::from_fn(|_| vec![frame.clone(), frame.clone()]);
+        let picker = Picker::halfblocks();
+        encode_all_frames(&mut slot, &picker, sprite_encode_rect(&picker));
+        for dir in &slot.sprites.encoded[crate::creature::SILHOUETTE_STATE] {
+            assert_eq!(dir.len(), 1);
+            assert!(dir[0].is_some());
+        }
+    }
+
+    #[test]
+    #[ignore = "requires network access; writes to $HOME/.config/poclimon/sprites"]
+    fn playing_uses_the_hop_sheet_when_one_exists() {
+        let mut slot = CreatureSlot::new(25, "Pikachu".to_string());
+        load_slot_sprites(&mut slot, 1).expect("Pikachu loads");
+        let (hop, idle) = (&slot.sprites.hop[0], &slot.sprites.idle[0]);
+        assert!(!hop.is_empty());
+        assert!(
+            !Arc::ptr_eq(&hop[0], &idle[0]),
+            "Playing fell back to Idle frames"
+        );
+    }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "poclimon"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2024"
 description = "A TUI idle pet game.  Sort of."
 authors = ["John Barden"]
@@ -28,6 +28,8 @@ ratatui = { version = "0.30", features = ["crossterm"] }
 ratatui-image = { version = "11.1", default-features = false, features = ["crossterm"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
+hmac = "0.12"
+sha2 = "0.10"
 
 [build-dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }

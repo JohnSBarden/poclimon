@@ -3,6 +3,18 @@ use std::path::PathBuf;
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=assets/poclimon-title.png");
+    println!("cargo:rerun-if-env-changed=POCLIMON_SAVE_KEY");
+
+    // Release save-signing key (see src/config/save.rs). Unset means a dev
+    // build; set but malformed (e.g. an empty CI secret) must fail loudly
+    // rather than silently produce a release signed with the dev key.
+    if let Ok(key) = std::env::var("POCLIMON_SAVE_KEY") {
+        assert!(
+            key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit()),
+            "POCLIMON_SAVE_KEY must be 64 hex characters (32 bytes), got {} characters",
+            key.len()
+        );
+    }
 
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let dest = PathBuf::from(&out_dir).join("title_art.rs");

@@ -6,6 +6,7 @@ mod config;
 mod creature;
 mod creatures;
 mod devtools;
+mod evolutions;
 mod kitty_upload;
 mod notification;
 mod sprite;
@@ -43,25 +44,37 @@ const TICK: Duration = Duration::from_millis(50);
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Cli::parse();
 
-    let (config, save_path): (GameConfig, Option<PathBuf>) = if let Some(name) = &args.creature {
-        // Quick override — single creature, no persistence.
-        let cfg = match GameConfig::from_creature_name(name) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("Warning: {e} — using default");
-                GameConfig::default()
+    let (config, save_path, notice): (GameConfig, Option<PathBuf>, Option<String>) =
+        if let Some(name) = &args.creature {
+            // Quick override — single creature, no persistence.
+            let cfg = match GameConfig::from_creature_name(name) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Warning: {e} — using default");
+                    GameConfig::default()
+                }
+            };
+            (cfg, None, None)
+        } else {
+            let path = args.config.unwrap_or_else(config::default_config_path);
+            // Never fall back to defaults here: the next save would overwrite
+            // the progress we failed to read.
+            match GameConfig::load_game(&path) {
+                Ok(game) => (game.config, Some(game.save_path), game.notice),
+                Err(e) => {
+                    eprintln!(
+                        "Error: couldn't load {}: {e}\n\
+                         Your files were left untouched. Fix the file, or move it \
+                         aside to start over.\n\
+                         (`poclimon --creature pikachu` runs without reading it.)",
+                        path.display()
+                    );
+                    std::process::exit(1);
+                }
             }
         };
-        (cfg, None)
-    } else if let Some(path) = args.config {
-        let cfg = GameConfig::load(&path)?;
-        (cfg, Some(path))
-    } else {
-        let path = config::default_config_path();
-        let cfg = GameConfig::load_default().unwrap_or_default();
-        (cfg, Some(path))
-    };
 
+    install_panic_hook();
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -93,6 +106,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut app = App::new(config, save_path);
+    if let Some(notice) = notice {
+        app.notify(notification::NotifLevel::Warn, notice);
+    }
+    app.announce_ready_to_evolve();
     app.is_tmux = picker.tmux_detected();
     app.encoder = Some(sprite_loading::SpriteEncoder::new(&picker));
 
@@ -100,9 +117,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let res = run_app(&mut terminal, &mut app, &mut picker);
 
-    // Free the terminal-side image memory Kitty/Ghostty would otherwise keep.
-    let ids = app.all_kitty_ids();
-    app.retire_kitty_images(&ids);
+    // Runs on every exit path out of the loop, including errors: saves the
+    // roster and frees the terminal-side images Kitty/Ghostty would keep.
+    let saved = app.on_quit();
     write_term_writes(&mut app.term_writes);
 
     disable_raw_mode()?;
@@ -112,8 +129,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(e) = res {
         eprintln!("Error: {e}");
     }
+    if let Err(e) = saved {
+        eprintln!("Warning: couldn't save progress: {e}");
+    }
 
     Ok(())
+}
+
+/// Restore the terminal before the panic message prints. Without this a
+/// panic leaves raw mode and the alternate screen on, and the message is
+/// lost with the screen.
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
+        default_hook(info);
+    }));
 }
 
 /// Write queued Kitty uploads/deletes straight to the terminal.
@@ -211,6 +243,25 @@ fn run_app(
 
 fn handle_key(app: &mut App, code: KeyCode) {
     match code {
+        // ── Evolution branch popup: a digit picks, Esc cancels ──
+        _ if app.prompt_mode == app::PromptMode::EvolveChoice => match code {
+            KeyCode::Esc => {
+                app.prompt_mode = app::PromptMode::None;
+                app.evolve_choices.clear();
+            }
+            KeyCode::Char(c) => {
+                let picked = c
+                    .to_digit(10)
+                    .and_then(|d| (d as usize).checked_sub(1))
+                    .and_then(|i| app.evolve_choices.get(i).copied());
+                if let Some(target) = picked {
+                    app.prompt_mode = app::PromptMode::None;
+                    app.evolve_choices.clear();
+                    app.start_evolution(target);
+                }
+            }
+            _ => {}
+        },
         // ── Prompt intercept — handles all keys when a prompt is open ──
         _ if app.prompt_mode != app::PromptMode::None => match code {
             KeyCode::Esc => {
@@ -226,7 +277,7 @@ fn handle_key(app: &mut App, code: KeyCode) {
                     match mode {
                         app::PromptMode::Add => app.add_creature_by_dex(id),
                         app::PromptMode::Swap => app.swap_selected_to_dex(id),
-                        app::PromptMode::None => {}
+                        app::PromptMode::None | app::PromptMode::EvolveChoice => {}
                     }
                 } else {
                     app.notify(
@@ -273,6 +324,7 @@ fn handle_key(app: &mut App, code: KeyCode) {
         KeyCode::Char('r') | KeyCode::Char('R') => {
             app.remove_selected();
         }
+        KeyCode::Char('v') | KeyCode::Char('V') => app.request_evolution(),
         KeyCode::Tab => {
             if app.has_background_load() {
                 app.notify(

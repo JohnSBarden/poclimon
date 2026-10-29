@@ -142,6 +142,16 @@ impl Animator {
         self.hop_anim = Some(hop);
     }
 
+    /// Take `other`'s timing data while keeping this animator's current state
+    /// and its start time, so a sprite reload doesn't interrupt what the
+    /// creature is doing.
+    pub fn adopt_timings(&mut self, other: Animator) {
+        self.idle_anim = other.idle_anim;
+        self.eat_anim = other.eat_anim;
+        self.sleep_anim = other.sleep_anim;
+        self.hop_anim = other.hop_anim;
+    }
+
     /// Get the current animation state.
     pub fn state(&self) -> AnimationState {
         self.state
@@ -191,6 +201,29 @@ mod tests {
     fn make_test_animation() -> Animation {
         // 3 frames, 100 ms each (tick=2 → 2×50=100 ms), 300 ms total.
         Animation::new(3, &[2, 2, 2])
+    }
+
+    #[test]
+    fn test_adopt_timings_keeps_state() {
+        let mut animator = Animator::new();
+        animator.load_animations(
+            make_test_animation(),
+            make_test_animation(),
+            make_test_animation(),
+        );
+        animator.set_state(AnimationState::Eating);
+
+        let mut reloaded = Animator::new();
+        reloaded.load_animations(
+            Animation::new(1, &[2]),
+            Animation::new(1, &[2]),
+            Animation::new(1, &[2]),
+        );
+        reloaded.set_hop_animation(Animation::new(1, &[2]));
+        animator.adopt_timings(reloaded);
+
+        assert_eq!(animator.state(), AnimationState::Eating);
+        assert!(animator.hop_anim.is_some());
     }
 
     #[test]
