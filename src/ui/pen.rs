@@ -106,6 +106,7 @@ pub(super) fn render_pen(
 
     let selected = app.selected;
     let transition_slot_index = app.transition_slot_index();
+    let evolving_slot_index = app.evolving_slot_index();
     let transition_state = app
         .swap_transition
         .as_ref()
@@ -240,17 +241,35 @@ pub(super) fn render_pen(
             continue;
         }
 
-        match pick_protocol_index(&slot.sprites.encoded, state_idx, dir_idx, frame_idx) {
+        // Evolution flicker: draw a white silhouette, of the old form or (once
+        // loaded) the new one. The new form's frames live in the transition
+        // until it's applied; uploads go through the same Kitty path.
+        let creature_id = slot.creature_id;
+        let mut sprites = &mut slot.sprites;
+        if evolving_slot_index == Some(i) {
+            state_idx = crate::creature::SILHOUETTE_STATE;
+            frame_idx = 0;
+            if let Some(evo) = app.evolution.as_mut()
+                && evo.shows_new_form()
+                && let Some(new) = evo.loaded_slot_mut()
+            {
+                sprites = &mut new.sprites;
+            }
+            // Silhouettes have transparent gaps; clear what was drawn before.
+            f.render_widget(Clear, img_area);
+        }
+
+        match pick_protocol_index(&sprites.encoded, state_idx, dir_idx, frame_idx) {
             Some((picked_state, picked_dir, picked_frame)) => {
-                if let Some(up) = slot.sprites.kitty_uploads[picked_state][picked_dir]
+                if let Some(up) = sprites.kitty_uploads[picked_state][picked_dir]
                     .get_mut(picked_frame)
                     .and_then(Option::take)
                 {
-                    slot.sprites.kitty_ids.push(up.id);
+                    sprites.kitty_ids.push(up.id);
                     uploads.push(up.seq);
                 }
                 if let Some(protocol) =
-                    slot.sprites.encoded[picked_state][picked_dir][picked_frame].as_mut()
+                    sprites.encoded[picked_state][picked_dir][picked_frame].as_mut()
                 {
                     f.render_widget(Image::new(protocol), img_area);
                     placements.extend(placement_at(f.buffer_mut(), img_area, protocol));
@@ -269,14 +288,14 @@ pub(super) fn render_pen(
             None => {
                 debug_log(format!(
                     "protocol_miss id={} state={} dir={} frame={} lens=[{}/{}/{}/{}]",
-                    slot.creature_id,
+                    creature_id,
                     state_idx,
                     dir_idx,
                     frame_idx,
-                    slot.sprites.encoded[state_idx][0].len(),
-                    slot.sprites.encoded[state_idx][1].len(),
-                    slot.sprites.encoded[state_idx][2].len(),
-                    slot.sprites.encoded[state_idx][3].len()
+                    sprites.encoded[state_idx][0].len(),
+                    sprites.encoded[state_idx][1].len(),
+                    sprites.encoded[state_idx][2].len(),
+                    sprites.encoded[state_idx][3].len()
                 ));
                 f.render_widget(Clear, img_area);
                 f.render_widget(
@@ -446,9 +465,9 @@ pub(super) fn render_pen(
 /// 3) any direction in requested state
 /// 4) any direction in Idle state
 ///
-/// The array has 5 states: 0=Idle, 1=Eat, 2=Sleep, 3=Recall, 4=Playing (Hop).
+/// States: 0=Idle, 1=Eat, 2=Sleep, 3=Recall, 4=Playing (Hop), 5=Silhouette.
 fn pick_protocol_index(
-    encoded: &[[Vec<Option<Protocol>>; 4]; 5],
+    encoded: &[[Vec<Option<Protocol>>; 4]; crate::creature::ENCODED_STATES],
     state_idx: usize,
     dir_idx: usize,
     frame_idx: usize,

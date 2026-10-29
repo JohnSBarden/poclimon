@@ -54,6 +54,16 @@ pub fn level_evolutions(id: u32, level: u32) -> Vec<u32> {
         .collect()
 }
 
+/// The lowest level at which `id` can evolve by leveling, if it can at all.
+pub fn next_evolution_level(id: u32) -> Option<u32> {
+    evolutions_from(id)
+        .filter_map(|e| match e.method {
+            Method::Level(at) => Some(u32::from(at)),
+            _ => None,
+        })
+        .min()
+}
+
 /// Whether the player may add or swap in species `id`.
 pub fn is_selectable(id: u32, unlocked: &[u32]) -> bool {
     u16::try_from(id).is_ok_and(|id16| BASE_SELECTABLE.binary_search(&id16).is_ok())

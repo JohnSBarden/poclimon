@@ -44,6 +44,12 @@ impl Direction {
     }
 }
 
+/// Number of encoded "states" per slot: the 5 animation states plus the
+/// evolution silhouette.
+pub const ENCODED_STATES: usize = 6;
+/// Encoded index of the all-white silhouette used by the evolution animation.
+pub const SILHOUETTE_STATE: usize = 5;
+
 /// All pixel frames and terminal-encoded protocols for a single creature slot.
 ///
 /// Collects the 5 animation caches (Idle/Eat/Sleep/Recall/Hop) and their
@@ -56,16 +62,17 @@ pub struct SpriteCache {
     pub recall: [Vec<Arc<DynamicImage>>; 4],
     pub hop: [Vec<Arc<DynamicImage>>; 4],
     /// Pre-encoded Protocol objects indexed by [state_index][dir_index][frame_index].
-    /// state 0=Idle, 1=Eat, 2=Sleep, 3=Recall, 4=Playing (Hop).
+    /// state 0=Idle, 1=Eat, 2=Sleep, 3=Recall, 4=Playing (Hop), 5=evolution
+    /// silhouette (frame 0 of Idle, all white).
     /// dir: 0=Down, 1=Left, 2=Up, 3=Right.
-    pub encoded: [[Vec<Option<Protocol>>; 4]; 5],
+    pub encoded: [[Vec<Option<Protocol>>; 4]; ENCODED_STATES],
     /// The size `Rect` (position 0,0) these protocols were encoded for.
     /// `None` means not yet encoded. Position-independent — re-encode only on resize.
     pub encoded_rect: Option<ratatui::layout::Rect>,
     /// Kitty only: transmit sequences taken out of `encoded` (same indexing),
     /// written to the terminal just before each frame is first displayed.
     /// See `kitty_upload` for why this bypasses ratatui-image's own upload.
-    pub kitty_uploads: [[Vec<Option<KittyUpload>>; 4]; 5],
+    pub kitty_uploads: [[Vec<Option<KittyUpload>>; 4]; ENCODED_STATES],
     /// Kitty only: ids of images uploaded to the terminal for this slot, so
     /// they can be deleted when the slot is replaced or released.
     pub kitty_ids: Vec<u32>,

@@ -59,6 +59,7 @@ poclimon --config ./my-roster.toml # custom config
 | `A`         | Add a creature (enter Pokédex ID)                                         |
 | `R`         | Release selected creature (requires 2+ — you can't release your last one) |
 | `Tab`       | Swap selected creature (enter Pokédex ID)                                 |
+| `V`         | Evolve selected creature once its nameplate shows ✨ (pick a branch with 1–3) |
 | `P`         | Play with selected creature                                               |
 | `←` / `→`   | Cycle selection                                                           |
 | `1`–`6`     | Select by slot number                                                     |
@@ -91,7 +92,7 @@ You start with Bulbasaur, Charmander, Squirtle, Pikachu and Eevee. Hit `A` to ad
 
 **What you can pick:** any **base form** (562 of the 1025, from Bulbasaur to Mewtwo), plus anything you've **unlocked by evolving** into it. Evolved forms like Ivysaur or Charizard are locked until you earn them. Species whose pre-evolution is a baby (Pikachu, Snorlax, Clefairy...) count as base forms, and Vaporeon, Jolteon and Flareon stay pickable until item evolution exists.
 
-**Leveling:** Eat or Play earns 2 XP/s for 10 s, then 1 XP/s up to 40 s. Every other moment earns 0.1 XP/s, so a pen left running still grows. Level *n* → *n*+1 takes 50 × *n* XP. When a creature reaches its real evolution level (Bulbasaur at 16, Charmeleon at 36...), its nameplate shows `✨`. Evolving it in the pen is coming next.
+**Leveling:** Eat or Play earns 2 XP/s for 10 s, then 1 XP/s up to 40 s. Every other moment earns 0.1 XP/s, so a pen left running still grows. Level *n* → *n*+1 takes 50 × *n* XP. When a creature reaches its real evolution level (Bulbasaur at 16, Charmeleon at 36...), its nameplate shows `✨`. Press `V` to evolve it right in the pen: it keeps its level, XP and spot, and the new species is unlocked for Add/Swap. Item, trade and friendship evolutions (Eevee, Pikachu → Raichu...) come later.
 
 ---
 

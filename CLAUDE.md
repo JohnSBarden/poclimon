@@ -98,6 +98,12 @@ brings back a visible bug.
    up while keys were pressed.)
 8. Frames are written through a 64 KiB `BufWriter` inside a synchronized
    update (DEC 2026) so terminals present whole frames.
+9. **Evolution draws from two slots.** `encoded[SILHOUETTE_STATE]` (white
+   Idle frame 0, built in `encode_all_frames`) is shown for the evolving
+   creature, alternating with the *pending* new form held in
+   `App::evolution` until it's applied. That pending slot's uploads go through
+   the same path, and its ids are in `all_kitty_ids` so quitting mid-evolution
+   still deletes them.
 
 **Known limitation:** ratatui-image's startup capability query reads stdin
 on a helper thread. If a terminal never answers the query, that thread
@@ -199,6 +205,10 @@ POCLIMON_DEBUG_LOG=/tmp/poclimon.log cargo run
 
 # Speed up time-based XP (dev builds only; ignored when built with POCLIMON_SAVE_KEY)
 POCLIMON_XP_MULTIPLIER=500 cargo run
+
+# Scripted evolution (Bulbasaur → Ivysaur) through the harness
+cd tools/term-harness && POCLIMON_XP_MULTIPLIER=500 python3 run.py ../../target/debug/poclimon kitty out/evo.bin --script evolve \
+  && python3 kitty_check.py out/evo.bin && python3 stale.py out/evo.bin
 
 # Regenerate the evolution table (download the 3 CSVs listed in gen.py into an empty dir)
 python3 -I tools/gen-evolutions/gen.py <csv-dir> > src/evolutions/data.rs
