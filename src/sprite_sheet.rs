@@ -97,6 +97,56 @@ pub fn normalize_frames(
         .collect()
 }
 
+/// Normalize Hop frames like [`normalize_frames`], but follow the creature up.
+///
+/// Hop frames are much taller than Idle (e.g. 32x72 vs 32x32) and the creature
+/// rises to near the top of them, so a center crop to the Idle size cuts it off
+/// mid-jump. Instead each frame's crop window moves up by however far the
+/// creature's feet are above the lowest frame's, keeping it whole.
+///
+/// Returns the frames and, per frame, how far its window moved as a fraction
+/// of `target_h`; the renderer raises the sprite by that much.
+pub fn normalize_hop_frames(
+    frames: Vec<DynamicImage>,
+    target_w: u32,
+    target_h: u32,
+) -> (Vec<DynamicImage>, Vec<f32>) {
+    if target_w == 0 || target_h == 0 {
+        let lifts = vec![0.0; frames.len()];
+        return (frames, lifts);
+    }
+
+    // One past the lowest opaque row of each frame, if it has any pixels.
+    let bottoms: Vec<Option<u32>> = frames
+        .iter()
+        .map(|f| {
+            f.pixels()
+                .filter(|(_, _, p)| p[3] != 0)
+                .map(|(_, y, _)| y + 1)
+                .max()
+        })
+        .collect();
+    let ground = bottoms.iter().flatten().copied().max().unwrap_or(0);
+
+    frames
+        .into_iter()
+        .zip(bottoms)
+        .map(|(frame, bottom)| {
+            let (fw, fh) = frame.dimensions();
+            let centered_y = fh.saturating_sub(target_h) / 2;
+            let lift = bottom.map_or(0, |b| ground - b);
+            let src_y = centered_y.saturating_sub(lift);
+            let src_x = fw.saturating_sub(target_w) / 2;
+            let dst_x = target_w.saturating_sub(fw) / 2;
+            let dst_y = target_h.saturating_sub(fh) / 2;
+            let cropped = frame.crop_imm(src_x, src_y, fw.min(target_w), fh.min(target_h));
+            let mut canvas = DynamicImage::ImageRgba8(RgbaImage::new(target_w, target_h));
+            let _ = canvas.copy_from(&cropped, dst_x, dst_y);
+            (canvas, (centered_y - src_y) as f32 / target_h as f32)
+        })
+        .unzip()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,5 +302,41 @@ mod tests {
         for f in &normalized {
             assert_eq!(f.dimensions(), (40, 56));
         }
+    }
+
+    /// A 10x30 Hop-style frame with a 4x4 creature whose feet are `lift`
+    /// pixels above the ground row (row 20, the center crop's bottom edge).
+    fn hop_frame(lift: u32) -> DynamicImage {
+        let mut img = RgbaImage::new(10, 30);
+        for y in (16 - lift)..(20 - lift) {
+            for x in 3..7 {
+                img.put_pixel(x, y, Rgba([255, 0, 0, 255]));
+            }
+        }
+        DynamicImage::ImageRgba8(img)
+    }
+
+    fn opaque_pixels(img: &DynamicImage) -> usize {
+        img.pixels().filter(|(_, _, p)| p[3] != 0).count()
+    }
+
+    #[test]
+    fn test_normalize_hop_frames_keeps_airborne_creature() {
+        let (frames, lifts) = normalize_hop_frames(vec![hop_frame(0), hop_frame(12)], 10, 10);
+        for f in &frames {
+            assert_eq!(f.dimensions(), (10, 10));
+            assert_eq!(opaque_pixels(f), 16, "creature must not be cropped");
+        }
+        // The window moves up 10 px (as far as the frame allows); the other
+        // 2 px of the jump show inside the canvas.
+        assert_eq!(lifts, vec![0.0, 1.0]);
+    }
+
+    #[test]
+    fn test_normalize_hop_frames_blank_frame_has_no_lift() {
+        let blank = DynamicImage::ImageRgba8(RgbaImage::new(10, 30));
+        let (frames, lifts) = normalize_hop_frames(vec![hop_frame(0), blank], 10, 10);
+        assert_eq!(frames.len(), 2);
+        assert_eq!(lifts, vec![0.0, 0.0]);
     }
 }
