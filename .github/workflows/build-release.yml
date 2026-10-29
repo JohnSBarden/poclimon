@@ -83,13 +83,31 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+      - name: Extract release notes from CHANGELOG.md
+        id: notes
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          awk -v tag="$TAG" '
+            index($0, "## [" tag "]") == 1 { f=1; next }
+            f && /^## / { exit }
+            f
+          ' CHANGELOG.md > release-notes.md
+          if grep -q '[^[:space:]]' release-notes.md; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::No CHANGELOG.md section for $TAG; using generated notes"
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: ${{ steps.notes.outputs.found == 'true' && 'release-notes.md' || '' }}
+          generate_release_notes: ${{ steps.notes.outputs.found != 'true' }}
           files: artifacts/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
