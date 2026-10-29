@@ -6,6 +6,7 @@ mod config;
 mod creature;
 mod creatures;
 mod devtools;
+mod evolutions;
 mod kitty_upload;
 mod notification;
 mod sprite;
@@ -108,6 +109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(notice) = notice {
         app.notify(notification::NotifLevel::Warn, notice);
     }
+    app.announce_ready_to_evolve();
     app.is_tmux = picker.tmux_detected();
     app.encoder = Some(sprite_loading::SpriteEncoder::new(&picker));
 

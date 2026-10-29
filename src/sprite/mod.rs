@@ -36,7 +36,7 @@ fn http_agent() -> &'static ureq::Agent {
 }
 
 /// All animations loaded during the full (Phase 2) background load.
-const ALL_ANIMS: &[&str] = &["Idle", "Eat", "Sleep", "Spin", "Rotate"];
+const ALL_ANIMS: &[&str] = &["Idle", "Eat", "Sleep", "Spin", "Rotate", "Hop"];
 
 /// Result type for [`download_all_sprites`]:
 /// `(anim_data_path, downloaded_sheets, warning_messages)`.

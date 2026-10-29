@@ -93,6 +93,44 @@ impl SpriteCache {
     }
 }
 
+/// 50 ms game ticks per second.
+const TICKS_PER_SEC: u32 = 20;
+
+/// XP earned per second outside the active Eat/Play window, in milli-XP
+/// (100 = 0.1 xp/s, a tenth of the sustained active rate). Tune here.
+pub const IDLE_XP_PER_SEC_MILLI: u32 = 100;
+
+/// Where XP came from, so sources can be scaled or reported differently.
+/// Rare candy and combat will join these (#27).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XpSource {
+    /// Eating or Playing inside the 40 s window.
+    Active,
+    /// Any other time the game is running.
+    Idle,
+}
+
+/// XP needed to go from `level` to `level + 1`.
+pub fn xp_to_next_level(level: u32) -> u32 {
+    50 * level
+}
+
+/// `POCLIMON_XP_MULTIPLIER` scales time-based XP so real-level evolution can
+/// be tested quickly. Dev builds only: in a release build it would be a cheat.
+fn xp_multiplier() -> u32 {
+    static MULTIPLIER: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *MULTIPLIER.get_or_init(|| {
+        if !crate::config::save::is_dev_build() {
+            return 1;
+        }
+        std::env::var("POCLIMON_XP_MULTIPLIER")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&m| m > 0)
+            .unwrap_or(1)
+    })
+}
+
 /// A single creature slot in the shared-pen display.
 ///
 /// Pixel data lives here; the animator only knows timing/state.
@@ -108,21 +146,21 @@ pub struct CreatureSlot {
     /// Current experience points earned by this creature (whole numbers).
     /// Increases while the creature is Eating or Playing. Resets to 0 on level-up.
     pub xp: u32,
-    /// Sub-integer XP accumulator.
+    /// Sub-integer XP accumulator, in thousandths of an XP point.
     ///
-    /// XP is earned at rates like 2xp/sec, accrued 0.1xp per 50ms tick. Storing
-    /// only `u32` would floor every tick to 0 and XP would never increase.
-    /// Instead we bank the fractional part here and only "cash out" whole points
-    /// into `xp` once the accumulator crosses 1.0.
-    pub xp_frac: f32,
+    /// XP is earned at rates like 2xp/sec, i.e. 0.1xp (100 milli-XP) per 50ms
+    /// tick. We bank the fraction here and "cash out" whole points into `xp`
+    /// every 1000. Integer math keeps it exact: an `f32` accumulator drifted
+    /// low and a full 40 s session earned 49 xp instead of 50.
+    pub xp_milli: u32,
     /// Current level (starts at 1). Increases when `xp` hits the level threshold.
     /// Threshold = `50 * level` (50 xp for level 1→2, 100 for 2→3, etc.).
     pub level: u32,
-    /// Seconds the creature has been continuously in an XP-earning state (Eating
-    /// or Playing). Used to throttle XP gain over time — rate slows at 10s and
-    /// stops at 40s. Resets to 0.0 whenever the state switches away from
-    /// Eating/Playing.
-    pub anim_active_secs: f32,
+    /// Ticks (50 ms each) the creature has been continuously in an XP-earning
+    /// state (Eating or Playing). Used to throttle XP gain over time — rate
+    /// slows at 10s and stops at 40s. Resets to 0 whenever the state switches
+    /// away from Eating/Playing.
+    pub active_ticks: u32,
     /// Current X position in terminal cells, relative to pen_inner.x.
     pub pos_x: f32,
     /// Current Y position in terminal cells, relative to pen_inner.y.
@@ -169,53 +207,88 @@ impl CreatureSlot {
             dir_cooldown_ticks: 0,
             // XP and leveling — start at level 1, no XP yet.
             xp: 0,
-            xp_frac: 0.0,
+            xp_milli: 0,
             level: 1,
-            anim_active_secs: 0.0,
+            active_ticks: 0,
             position_initialized: false,
         }
     }
 
+    /// Copy position, velocity, facing and wander timers from `other`, so a
+    /// replacement creature continues from where the old one stood.
+    pub fn take_motion_from(&mut self, other: &CreatureSlot) {
+        self.pos_x = other.pos_x;
+        self.pos_y = other.pos_y;
+        self.vel_x = other.vel_x;
+        self.vel_y = other.vel_y;
+        self.current_dir = other.current_dir;
+        self.dir_hold_ticks = other.dir_hold_ticks;
+        self.pause_ticks = other.pause_ticks;
+        self.pause_face_down = other.pause_face_down;
+        self.dir_cooldown_ticks = other.dir_cooldown_ticks;
+        // Without this, render_pen would re-randomize the position.
+        self.position_initialized = other.position_initialized;
+    }
+
     /// Accrue XP for one 50ms tick. Returns the new level if the creature leveled up.
     ///
-    /// Only accrues XP while in an XP-earning state (Eating or Playing).
-    /// XP rate decays over time: 2xp/s for first 10s, 1xp/s to 40s, then 0.
+    /// Eating/Playing earns 2 xp/s for the first 10 s and 1 xp/s up to 40 s.
+    /// Every other moment (Idle, Sleeping, or past the 40 s window) earns the
+    /// idle rate, [`IDLE_XP_PER_SEC_MILLI`], so idle time is never wasted.
     pub fn tick_xp(&mut self) -> Option<u32> {
-        const TICK_SECS: f32 = 0.05;
+        /// End of the 2 xp/s phase, and of the 1 xp/s phase.
+        const FAST_UNTIL: u32 = 10 * TICKS_PER_SEC;
+        const SLOW_UNTIL: u32 = 40 * TICKS_PER_SEC;
 
-        let is_xp_state = matches!(
+        let is_active_state = matches!(
             self.animator.state(),
             crate::animation::AnimationState::Eating | crate::animation::AnimationState::Playing
         );
-        if !is_xp_state {
-            return None;
-        }
-
-        self.anim_active_secs += TICK_SECS;
-
-        let xp_rate = if self.anim_active_secs <= 10.0 {
-            2.0_f32
-        } else if self.anim_active_secs <= 40.0 {
-            1.0_f32
+        let (milli_per_tick, source) = if is_active_state {
+            self.active_ticks = self.active_ticks.saturating_add(1);
+            if self.active_ticks <= FAST_UNTIL {
+                (2000 / TICKS_PER_SEC, XpSource::Active)
+            } else if self.active_ticks <= SLOW_UNTIL {
+                (1000 / TICKS_PER_SEC, XpSource::Active)
+            } else {
+                (IDLE_XP_PER_SEC_MILLI / TICKS_PER_SEC, XpSource::Idle)
+            }
         } else {
-            0.0_f32
+            (IDLE_XP_PER_SEC_MILLI / TICKS_PER_SEC, XpSource::Idle)
         };
+        self.grant_xp(milli_per_tick, source)
+    }
 
-        self.xp_frac += xp_rate * TICK_SECS;
-        let whole = self.xp_frac.floor() as u32;
-        if whole > 0 {
-            self.xp = self.xp.saturating_add(whole);
-            self.xp_frac -= whole as f32;
+    /// The single path for earning XP. `milli_xp` is in thousandths of a
+    /// point. Returns the new level if one or more levels were gained.
+    ///
+    /// Future sources (rare candy, combat) go through here too, so level
+    /// thresholds and level-up handling live in one place.
+    pub fn grant_xp(&mut self, milli_xp: u32, source: XpSource) -> Option<u32> {
+        let milli_xp = match source {
+            XpSource::Active | XpSource::Idle => milli_xp.saturating_mul(xp_multiplier()),
+        };
+        self.xp_milli = self.xp_milli.saturating_add(milli_xp);
+        self.xp = self.xp.saturating_add(self.xp_milli / 1000);
+        self.xp_milli %= 1000;
+
+        let start = self.level;
+        while self.xp >= xp_to_next_level(self.level) {
+            self.xp -= xp_to_next_level(self.level);
+            self.apply_level_up();
         }
+        (self.level > start).then_some(self.level)
+    }
 
-        let threshold = 50 * self.level;
-        if self.xp >= threshold {
-            self.xp = 0;
-            self.level += 1;
-            return Some(self.level);
-        }
+    /// Raise the level by one. Callers handle XP.
+    pub fn apply_level_up(&mut self) {
+        self.level = self.level.saturating_add(1);
+    }
 
-        None
+    /// Whether this creature has reached the canonical level for a level
+    /// evolution. Derived from species and level, so it's never stale.
+    pub fn ready_to_evolve(&self) -> bool {
+        !crate::evolutions::level_evolutions(self.creature_id, self.level).is_empty()
     }
 
     /// Update position and movement timers for one 50ms tick.
@@ -578,5 +651,103 @@ pub fn resolve_collisions(
     for slot in slots.iter_mut() {
         slot.pos_x = slot.pos_x.clamp(0.0, max_x);
         slot.pos_y = slot.pos_y.clamp(0.0, max_y);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::animation::AnimationState;
+
+    /// Ticks per second at the 50 ms game tick.
+    const TPS: u32 = 20;
+
+    fn eating_slot() -> CreatureSlot {
+        let mut slot = CreatureSlot::new(25, "Pikachu".to_string());
+        slot.animator.set_state(AnimationState::Eating);
+        slot
+    }
+
+    /// Run `ticks` XP ticks, returning every level-up reported.
+    fn run_ticks(slot: &mut CreatureSlot, ticks: u32) -> Vec<u32> {
+        (0..ticks).filter_map(|_| slot.tick_xp()).collect()
+    }
+
+    #[test]
+    fn test_first_ten_seconds_earn_twenty_xp() {
+        let mut slot = eating_slot();
+        run_ticks(&mut slot, 10 * TPS);
+        assert_eq!(slot.xp, 20);
+        assert_eq!(slot.level, 1);
+    }
+
+    #[test]
+    fn test_full_session_earns_fifty_xp_and_reaches_level_two() {
+        // 2 xp/s for 10 s + 1 xp/s for 30 s = 50 xp, exactly the Lv 1→2 threshold.
+        let mut slot = eating_slot();
+        let level_ups = run_ticks(&mut slot, 40 * TPS);
+        assert_eq!(
+            level_ups,
+            vec![2],
+            "a full session must level a Lv 1 creature"
+        );
+        assert_eq!(slot.level, 2);
+        assert_eq!(slot.xp, 0);
+    }
+
+    #[test]
+    fn test_idle_rate_after_the_forty_second_window() {
+        let mut slot = eating_slot();
+        run_ticks(&mut slot, 40 * TPS);
+        let (level, xp) = (slot.level, slot.xp);
+        run_ticks(&mut slot, 60 * TPS); // 60 s at 0.1 xp/s
+        assert_eq!((slot.level, slot.xp), (level, xp + 6));
+    }
+
+    #[test]
+    fn test_idle_and_sleeping_earn_a_tenth_of_an_xp_per_second() {
+        for state in [AnimationState::Idle, AnimationState::Sleeping] {
+            let mut slot = CreatureSlot::new(25, "Pikachu".to_string());
+            slot.animator.set_state(state);
+            run_ticks(&mut slot, 100 * TPS);
+            assert_eq!((slot.level, slot.xp), (1, 10), "{state:?}");
+        }
+    }
+
+    #[test]
+    fn test_idle_alone_reaches_level_two_after_five_hundred_seconds() {
+        let mut slot = CreatureSlot::new(25, "Pikachu".to_string());
+        assert_eq!(run_ticks(&mut slot, 500 * TPS - 1), Vec::<u32>::new());
+        assert_eq!(run_ticks(&mut slot, 1), vec![2]);
+    }
+
+    #[test]
+    fn test_large_grant_crosses_several_levels_and_keeps_the_rest() {
+        let mut slot = CreatureSlot::new(25, "Pikachu".to_string());
+        // 50 (L1→2) + 100 (L2→3) + 30 left over.
+        assert_eq!(slot.grant_xp(180_000, XpSource::Active), Some(3));
+        assert_eq!((slot.level, slot.xp), (3, 30));
+    }
+
+    #[test]
+    fn test_ready_to_evolve_at_the_canonical_level() {
+        let mut bulbasaur = CreatureSlot::new(1, "Bulbasaur".to_string());
+        bulbasaur.level = 15;
+        assert!(!bulbasaur.ready_to_evolve());
+        bulbasaur.level = 16;
+        assert!(bulbasaur.ready_to_evolve());
+
+        // Item/friendship evolutions are deferred, so these never become ready.
+        for id in [25, 133] {
+            let mut slot = CreatureSlot::new(id, String::new());
+            slot.level = 100;
+            assert!(!slot.ready_to_evolve(), "{id}");
+        }
+    }
+
+    #[test]
+    fn test_xp_multiplier_is_ignored_without_the_env_var() {
+        // The hook only exists for manual testing; CI never sets it.
+        assert_eq!(xp_multiplier(), 1);
     }
 }
