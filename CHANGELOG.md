@@ -9,6 +9,9 @@ for the diff.
 
 ## [Unreleased]
 
+### Changed
+- New Game Boy Color look: white dialog-style text boxes, battle-HUD nameplates with a blue EXP bar, and Gold/Silver-style pen colours.
+
 ### Fixed
 - Hopping creatures stay whole mid-jump instead of vanishing out of their sprite box.
 

@@ -1,4 +1,6 @@
-use super::theme::{FENCE_BROWN, GB_DARK, GB_DARKEST, GB_LIGHT, GB_LIGHTEST, GRASS_GREEN};
+use super::theme::{
+    CURSOR, EXP_BLUE, FENCE_BROWN, FLOWER_YELLOW, GRASS_GREEN, INK, PAPER, text_box,
+};
 use crate::animation::AnimationState;
 use crate::app::App;
 use crate::creature::{
@@ -102,7 +104,8 @@ pub(super) fn render_pen(
         .title(" 🌿 Pen ")
         .title_style(
             Style::default()
-                .fg(GB_LIGHTEST)
+                .fg(INK)
+                .bg(PAPER)
                 .add_modifier(Modifier::BOLD),
         );
     let pen_inner = block.inner(area);
@@ -119,7 +122,7 @@ pub(super) fn render_pen(
             let (tile, color) = match hash % 45 {
                 0 => ("\"", GRASS_GREEN),
                 1 => ("'", GRASS_GREEN),
-                44 => ("*", Color::Rgb(200, 200, 50)),
+                44 => ("*", FLOWER_YELLOW),
                 _ => continue,
             };
             f.render_widget(
@@ -387,18 +390,27 @@ pub(super) fn render_pen(
             } else {
                 format!("Lv.{}", slot.level)
             };
-            match slot.animator.state() {
-                AnimationState::Idle => lv,
-                AnimationState::Eating => format!("{lv} [{bar}] 🍖"),
-                AnimationState::Sleeping => format!("{lv} [{bar}] 💤"),
-                AnimationState::Playing => format!("{lv} [{bar}] 🧸"),
+            let icon = match slot.animator.state() {
+                AnimationState::Idle => None,
+                AnimationState::Eating => Some("🍖"),
+                AnimationState::Sleeping => Some("💤"),
+                AnimationState::Playing => Some("🧸"),
+            };
+            // EXP bar in the Gen 2 battle HUD's blue.
+            match icon {
+                None => ratatui::text::Line::from(lv),
+                Some(icon) => ratatui::text::Line::from(vec![
+                    Span::raw(format!("{lv} [")),
+                    Span::styled(bar, Style::default().fg(EXP_BLUE)),
+                    Span::raw(format!("] {icon}")),
+                ]),
             }
         };
 
         // Auto-size width to content, clamped to [8, SPRITE_W]. Display width,
         // not char count: the emoji are two cells wide.
         let display_w = |s: &str| ratatui::text::Line::from(s).width();
-        let content_w = display_w(&name_display).max(display_w(&level_display)) as u16;
+        let content_w = display_w(&name_display).max(level_display.width()) as u16;
         let label_w = (content_w + 2).clamp(8, SPRITE_W); // +2 for left/right borders
 
         // Center under the actual rendered sprite width, not the full cell area.
@@ -412,12 +424,11 @@ pub(super) fn render_pen(
 
         if label_y + LABEL_H <= pen_inner.y + pen_inner.height {
             let label_area = Rect::new(label_x, label_y, label_w, LABEL_H);
-            let name_color = if is_selected { GB_LIGHTEST } else { GB_LIGHT };
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Thick)
-                .border_style(Style::default().fg(if is_selected { GB_LIGHTEST } else { GB_DARK }))
-                .style(Style::default().bg(GB_DARKEST));
+            let block = text_box().border_style(Style::default().fg(if is_selected {
+                CURSOR
+            } else {
+                INK
+            }));
             let inner = block.inner(label_area);
             // Clear first: a styled Block only restyles cells, so sprite cells
             // underneath (Kitty placeholders, halfblocks) would survive with the
@@ -428,19 +439,14 @@ pub(super) fn render_pen(
             let row1 = Rect::new(inner.x, inner.y, inner.width, 1);
             let row2 = Rect::new(inner.x, inner.y + 1, inner.width, 1);
             f.render_widget(
-                Paragraph::new(name_display).style(Style::default().fg(name_color).add_modifier(
-                    if is_selected {
-                        Modifier::BOLD
-                    } else {
-                        Modifier::empty()
-                    },
-                )),
+                Paragraph::new(name_display).style(Style::default().add_modifier(if is_selected {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                })),
                 row1,
             );
-            f.render_widget(
-                Paragraph::new(level_display).style(Style::default().fg(GB_LIGHT)),
-                row2,
-            );
+            f.render_widget(Paragraph::new(level_display), row2);
         }
     }
 
