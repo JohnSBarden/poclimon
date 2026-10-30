@@ -40,7 +40,7 @@ src/
     panels.rs      — Layout, title/status/help panels, prompt popup; runs the Kitty fixup last
     pen.rs         — Pen, sprites, nameplates, toy
     splash.rs      — Startup splash screen
-    theme.rs       — Game Boy DMG palette
+    theme.rs       — Role-based colour themes (`gbc`, `terminal`), picked by `[display] theme`
 tools/term-harness/ — Headless terminal harness: records sessions per protocol, checks rendering
 build.rs           — Pre-renders the title art from assets/poclimon-title.png at compile time
 ```
@@ -86,7 +86,9 @@ brings back a visible bug.
    deleted and evict in-use ones once their quota fills.
 4. **Clear before overlaying sprites.** A styled `Block` only restyles
    cells; draw `Clear` first (nameplates, flash, popups), or sprite cells
-   survive underneath in the overlay's colours.
+   survive underneath in the overlay's colours. Inside the pen, use
+   `clear_to_ground` for anything not covered by a filled box straight
+   after: plain `Clear` punches a terminal-coloured hole in the `gbc` pen.
 5. **Run `fix_orphan_placeholders` after everything is drawn.** Kitty infers
    a placeholder's column from its left neighbour; anything drawn across an
    image row breaks that. `ui()` calls it last.
@@ -119,6 +121,7 @@ Settings (`~/.config/poclimon.toml`, free to edit):
 ```toml
 [display]
 scale = 3  # sprite scale multiplier — memory scales quadratically, clamped to 1–8
+theme = "gbc"  # "gbc" (everything filled, pen included) | "terminal" (no fills); unknown names fail to load
 ```
 
 Progress (`~/.config/poclimon/save.toml`, written by `config/save.rs`). The HMAC-SHA256
