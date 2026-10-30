@@ -59,12 +59,35 @@ pub struct TomlConfig {
 pub struct DisplayConfig {
     #[serde(default = "default_scale")]
     pub scale: u32,
+    #[serde(default)]
+    pub theme: ThemeName,
 }
 
 impl Default for DisplayConfig {
     fn default() -> Self {
         Self {
             scale: default_scale(),
+            theme: ThemeName::default(),
+        }
+    }
+}
+
+/// `[display] theme`: which colour theme the UI uses (see `ui::theme`).
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeName {
+    /// Game Boy Color: white text boxes and a white pen.
+    #[default]
+    Gbc,
+    /// No fills; the terminal's own colours show through.
+    Terminal,
+}
+
+impl ThemeName {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Gbc => "gbc",
+            Self::Terminal => "terminal",
         }
     }
 }
@@ -109,6 +132,7 @@ pub struct RosterSlot {
 #[derive(Debug, Clone)]
 pub struct GameConfig {
     pub scale: u32,
+    pub theme: ThemeName,
     /// Active roster entries.
     pub roster: Vec<RosterSlot>,
     /// Species unlocked beyond the base forms (signed with the save).
@@ -119,6 +143,7 @@ impl Default for GameConfig {
     fn default() -> Self {
         Self {
             scale: 3,
+            theme: ThemeName::default(),
             roster: vec![
                 RosterSlot {
                     creature_id: 1,
@@ -186,10 +211,10 @@ impl GameConfig {
             let content = fs::read_to_string(settings_path)?;
             toml::from_str(&repair_oversized_slot_ids(&content))?
         } else {
-            write_atomic(settings_path, &render_settings(default_scale()))?;
+            write_atomic(settings_path, &render_settings(&DisplayConfig::default()))?;
             TomlConfig::default()
         };
-        let scale = clamp_scale(settings.display.scale);
+        let display = settings.display.clone();
         let has_legacy = !settings.slot.is_empty() || settings.roster.is_some();
 
         let from_save = |data: save::SaveData| -> Result<Self, ConfigError> {
@@ -229,7 +254,7 @@ impl GameConfig {
                 // Dev builds leave the real settings file alone so a release
                 // build can still import it.
                 if !save::is_dev_build() {
-                    write_atomic(settings_path, &render_settings(scale))?;
+                    write_atomic(settings_path, &render_settings(&display))?;
                 }
                 config
             }
@@ -238,7 +263,8 @@ impl GameConfig {
                 Self::default()
             }
         };
-        config.scale = scale;
+        config.scale = clamp_scale(display.scale);
+        config.theme = display.theme;
 
         if needs_write {
             config.write_save(&save_path)?;
@@ -283,6 +309,7 @@ impl GameConfig {
         }
         Ok(Self {
             scale: 3,
+            theme: ThemeName::default(),
             roster: vec![RosterSlot {
                 creature_id: creature.id,
                 name: creature.name.to_string(),
@@ -334,6 +361,7 @@ impl GameConfig {
 
             return Ok(Self {
                 scale: clamp_scale(toml.display.scale),
+                theme: toml.display.theme,
                 roster,
                 unlocked: Vec::new(),
             });
@@ -393,6 +421,7 @@ impl GameConfig {
 
         Ok(Self {
             scale: clamp_scale(toml.display.scale),
+            theme: toml.display.theme,
             roster,
             unlocked: Vec::new(),
         })
@@ -493,11 +522,14 @@ fn clamp_scale(scale: u32) -> u32 {
 }
 
 /// The settings file. Progress lives in the signed save, not here.
-fn render_settings(scale: u32) -> String {
+fn render_settings(display: &DisplayConfig) -> String {
     format!(
         "# PoCLImon settings. Safe to edit; your Pokémon are in poclimon/save.toml.\n\
          [display]\n\
-         scale = {scale}  # sprite size multiplier, {MIN_SCALE}-{MAX_SCALE}\n"
+         scale = {}  # sprite size multiplier, {MIN_SCALE}-{MAX_SCALE}\n\
+         theme = \"{}\"  # \"gbc\" (Game Boy Color) or \"terminal\" (your terminal's colours)\n",
+        clamp_scale(display.scale),
+        display.theme.as_str()
     )
 }
 
@@ -830,6 +862,42 @@ creatures = ["pikachu"]
         // What was written must load back to the same roster.
         let reloaded = GameConfig::load_game(&path).unwrap();
         assert_eq!(ids(&reloaded.config), ids(&game.config));
+        assert_eq!(reloaded.config.theme, ThemeName::Gbc);
+    }
+
+    #[test]
+    fn test_theme_setting() {
+        let dir = test_dir("theme");
+        let path = dir.join("poclimon.toml");
+
+        fs::write(&path, "[display]\nscale = 3\n").unwrap();
+        assert_eq!(
+            GameConfig::load_game(&path).unwrap().config.theme,
+            ThemeName::Gbc
+        );
+
+        fs::write(&path, "[display]\ntheme = \"terminal\"\n").unwrap();
+        assert_eq!(
+            GameConfig::load_game(&path).unwrap().config.theme,
+            ThemeName::Terminal
+        );
+
+        // A typo is an error that leaves the file alone, like any bad setting.
+        let typo = "[display]\ntheme = \"gameboy\"\n";
+        fs::write(&path, typo).unwrap();
+        assert!(GameConfig::load_game(&path).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), typo);
+    }
+
+    #[test]
+    fn test_rendered_settings_load_back() {
+        let display = DisplayConfig {
+            scale: 5,
+            theme: ThemeName::Terminal,
+        };
+        let parsed: TomlConfig = toml::from_str(&render_settings(&display)).unwrap();
+        assert_eq!(parsed.display.scale, 5);
+        assert_eq!(parsed.display.theme, ThemeName::Terminal);
     }
 
     const LEGACY: &str = "[display]\nscale = 2\n\n[[slot]]\nid = 25\nslot_id = 9\n\
