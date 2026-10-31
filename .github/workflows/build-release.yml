@@ -4,6 +4,15 @@ on:
   push:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
+  # Rebuild an existing tag by hand: gh workflow run build-release.yml -f tag=v1.2.3
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build (e.g. v1.2.3)
+        required: true
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   build-ubuntu:
@@ -19,6 +28,8 @@ jobs:
       - name: Require save-signing key
         run: test -n "$POCLIMON_SAVE_KEY" || { echo "::error::POCLIMON_SAVE_KEY secret is not set"; exit 1; }
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl x86_64-pc-windows-gnu
@@ -54,6 +65,8 @@ jobs:
       - name: Require save-signing key
         run: test -n "$POCLIMON_SAVE_KEY" || { echo "::error::POCLIMON_SAVE_KEY secret is not set"; exit 1; }
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-apple-darwin aarch64-apple-darwin
@@ -84,10 +97,10 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
       - name: Extract release notes from CHANGELOG.md
         id: notes
-        env:
-          TAG: ${{ github.ref_name }}
         run: |
           awk -v tag="$TAG" '
             index($0, "## [" tag "]") == 1 { f=1; next }
@@ -106,6 +119,7 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.TAG }}
           body_path: ${{ steps.notes.outputs.found == 'true' && 'release-notes.md' || '' }}
           generate_release_notes: ${{ steps.notes.outputs.found != 'true' }}
           files: artifacts/*
