@@ -61,6 +61,9 @@ pub struct SpriteCache {
     pub sleep: [Vec<Arc<DynamicImage>>; 4],
     pub recall: [Vec<Arc<DynamicImage>>; 4],
     pub hop: [Vec<Arc<DynamicImage>>; 4],
+    /// Per Hop frame (same indexing as `hop`), how far to raise the sprite,
+    /// as a fraction of its height. Empty when Hop falls back to Idle.
+    pub hop_lift: [Vec<f32>; 4],
     /// Pre-encoded Protocol objects indexed by [state_index][dir_index][frame_index].
     /// state 0=Idle, 1=Eat, 2=Sleep, 3=Recall, 4=Playing (Hop), 5=evolution
     /// silhouette (frame 0 of Idle, all white).
@@ -92,6 +95,7 @@ impl SpriteCache {
             sleep: std::array::from_fn(|_| Vec::new()),
             recall: std::array::from_fn(|_| Vec::new()),
             hop: std::array::from_fn(|_| Vec::new()),
+            hop_lift: std::array::from_fn(|_| Vec::new()),
             encoded: std::array::from_fn(|_| std::array::from_fn(|_| Vec::new())),
             encoded_rect: None,
             kitty_uploads: std::array::from_fn(|_| std::array::from_fn(|_| Vec::new())),

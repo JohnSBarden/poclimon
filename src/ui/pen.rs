@@ -1,4 +1,4 @@
-use super::theme::{FENCE_BROWN, GB_DARK, GB_DARKEST, GB_LIGHT, GB_LIGHTEST, GRASS_GREEN};
+use super::theme::{Theme, theme};
 use crate::animation::AnimationState;
 use crate::app::App;
 use crate::creature::{
@@ -60,6 +60,13 @@ fn restore_halfblock_transparency(buf: &mut Buffer, area: Rect, beneath: &[Cell]
     }
 }
 
+/// `Clear` for areas inside the pen: wipes sprite cells, then repaints the
+/// ground so a filled pen doesn't get a hole in the terminal's background.
+fn clear_to_ground(f: &mut Frame<'_>, area: Rect, t: &Theme) {
+    f.render_widget(Clear, area);
+    f.render_widget(Block::default().style(Style::default().bg(t.ground)), area);
+}
+
 fn sprite_render_pos(
     slot: &CreatureSlot,
     pen_inner: Rect,
@@ -94,15 +101,20 @@ pub(super) fn render_pen(
         return Vec::new();
     }
 
-    // Single outer border — no inner dividers.
+    let t = theme(app.config.theme);
+
+    // Single outer border — no inner dividers. The fill is the theme's ground
+    // (none for the terminal theme); sprites draw over it.
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Thick)
-        .border_style(Style::default().fg(FENCE_BROWN))
+        .style(Style::default().bg(t.ground))
+        .border_style(Style::default().fg(t.fence))
         .title(" 🌿 Pen ")
         .title_style(
             Style::default()
-                .fg(GB_LIGHTEST)
+                .fg(t.ink)
+                .bg(t.paper)
                 .add_modifier(Modifier::BOLD),
         );
     let pen_inner = block.inner(area);
@@ -111,15 +123,15 @@ pub(super) fn render_pen(
     // ── Phase 0: Sparse grass + fence posts ───────────────────────────────────
     // Iterate every cell but only call render_widget on the ~7% that are tiles.
     // This keeps render calls to O(tiles) rather than O(width × height) and lets
-    // the terminal's own background show through everywhere else.
+    // the ground show through everywhere else.
     for y in pen_inner.y..pen_inner.y + pen_inner.height {
         for x in pen_inner.x..pen_inner.x + pen_inner.width {
             let hash =
                 (x as u32).wrapping_mul(2_654_435_761) ^ (y as u32).wrapping_mul(2_246_822_519);
             let (tile, color) = match hash % 45 {
-                0 => ("\"", GRASS_GREEN),
-                1 => ("'", GRASS_GREEN),
-                44 => ("*", Color::Rgb(200, 200, 50)),
+                0 => ("\"", t.grass),
+                1 => ("'", t.grass),
+                44 => ("*", t.flower),
                 _ => continue,
             };
             f.render_widget(
@@ -130,7 +142,7 @@ pub(super) fn render_pen(
     }
 
     // Fence posts every 4 cols on the top and bottom inner edge rows.
-    let fence_style = Style::default().fg(FENCE_BROWN);
+    let fence_style = Style::default().fg(t.fence);
     for col in (0..pen_inner.width).step_by(4) {
         f.render_widget(
             Paragraph::new(Span::styled("┃", fence_style)),
@@ -264,7 +276,7 @@ pub(super) fn render_pen(
         }
 
         if render_waiting_ball {
-            f.render_widget(Clear, img_area);
+            clear_to_ground(f, img_area, t);
             f.render_widget(
                 Paragraph::new("⚪").style(Style::default().fg(Color::LightRed)),
                 Rect::new(
@@ -279,7 +291,7 @@ pub(super) fn render_pen(
 
         if white_flash {
             let flash = Block::default().style(Style::default().bg(Color::White));
-            f.render_widget(Clear, img_area);
+            clear_to_ground(f, img_area, t);
             f.render_widget(flash, img_area);
             continue;
         }
@@ -299,7 +311,7 @@ pub(super) fn render_pen(
                 sprites = &mut new.sprites;
             }
             // Silhouettes have transparent gaps; clear what was drawn before.
-            f.render_widget(Clear, img_area);
+            clear_to_ground(f, img_area, t);
         }
 
         match pick_protocol_index(&sprites.encoded, state_idx, dir_idx, frame_idx) {
@@ -314,6 +326,17 @@ pub(super) fn render_pen(
                 if let Some(protocol) =
                     sprites.encoded[picked_state][picked_dir][picked_frame].as_mut()
                 {
+                    // Hop frames are cropped to follow the creature up; raise
+                    // the sprite by as much so it still leaves the ground.
+                    let mut img_area = img_area;
+                    if picked_state == AnimationState::Playing.encoded_index() {
+                        let lift = sprites.hop_lift[picked_dir]
+                            .get(picked_frame)
+                            .copied()
+                            .unwrap_or(0.0);
+                        let rows = (lift * f32::from(protocol.size().height)).round() as u16;
+                        img_area.y = img_area.y.saturating_sub(rows).max(pen_inner.y);
+                    }
                     draw_image(f, protocol, img_area);
                     placements.extend(placement_at(f.buffer_mut(), img_area, protocol));
                 } else {
@@ -321,7 +344,7 @@ pub(super) fn render_pen(
                         "protocol_race_miss id={} state={} dir={} frame={}",
                         slot.creature_id, picked_state, picked_dir, picked_frame
                     ));
-                    f.render_widget(Clear, img_area);
+                    clear_to_ground(f, img_area, t);
                     f.render_widget(
                         Paragraph::new("Loading…").style(Style::default().fg(Color::DarkGray)),
                         img_area,
@@ -340,7 +363,7 @@ pub(super) fn render_pen(
                     sprites.encoded[state_idx][2].len(),
                     sprites.encoded[state_idx][3].len()
                 ));
-                f.render_widget(Clear, img_area);
+                clear_to_ground(f, img_area, t);
                 f.render_widget(
                     Paragraph::new("Loading…").style(Style::default().fg(Color::DarkGray)),
                     img_area,
@@ -376,18 +399,27 @@ pub(super) fn render_pen(
             } else {
                 format!("Lv.{}", slot.level)
             };
-            match slot.animator.state() {
-                AnimationState::Idle => lv,
-                AnimationState::Eating => format!("{lv} [{bar}] 🍖"),
-                AnimationState::Sleeping => format!("{lv} [{bar}] 💤"),
-                AnimationState::Playing => format!("{lv} [{bar}] 🧸"),
+            let icon = match slot.animator.state() {
+                AnimationState::Idle => None,
+                AnimationState::Eating => Some("🍖"),
+                AnimationState::Sleeping => Some("💤"),
+                AnimationState::Playing => Some("🧸"),
+            };
+            // EXP bar in the Gen 2 battle HUD's blue.
+            match icon {
+                None => ratatui::text::Line::from(lv),
+                Some(icon) => ratatui::text::Line::from(vec![
+                    Span::raw(format!("{lv} [")),
+                    Span::styled(bar, Style::default().fg(t.exp_blue)),
+                    Span::raw(format!("] {icon}")),
+                ]),
             }
         };
 
         // Auto-size width to content, clamped to [8, SPRITE_W]. Display width,
         // not char count: the emoji are two cells wide.
         let display_w = |s: &str| ratatui::text::Line::from(s).width();
-        let content_w = display_w(&name_display).max(display_w(&level_display)) as u16;
+        let content_w = display_w(&name_display).max(level_display.width()) as u16;
         let label_w = (content_w + 2).clamp(8, SPRITE_W); // +2 for left/right borders
 
         // Center under the actual rendered sprite width, not the full cell area.
@@ -401,12 +433,9 @@ pub(super) fn render_pen(
 
         if label_y + LABEL_H <= pen_inner.y + pen_inner.height {
             let label_area = Rect::new(label_x, label_y, label_w, LABEL_H);
-            let name_color = if is_selected { GB_LIGHTEST } else { GB_LIGHT };
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Thick)
-                .border_style(Style::default().fg(if is_selected { GB_LIGHTEST } else { GB_DARK }))
-                .style(Style::default().bg(GB_DARKEST));
+            let block = t
+                .text_box()
+                .border_style(Style::default().fg(if is_selected { t.cursor } else { t.ink }));
             let inner = block.inner(label_area);
             // Clear first: a styled Block only restyles cells, so sprite cells
             // underneath (Kitty placeholders, halfblocks) would survive with the
@@ -417,19 +446,14 @@ pub(super) fn render_pen(
             let row1 = Rect::new(inner.x, inner.y, inner.width, 1);
             let row2 = Rect::new(inner.x, inner.y + 1, inner.width, 1);
             f.render_widget(
-                Paragraph::new(name_display).style(Style::default().fg(name_color).add_modifier(
-                    if is_selected {
-                        Modifier::BOLD
-                    } else {
-                        Modifier::empty()
-                    },
-                )),
+                Paragraph::new(name_display).style(Style::default().add_modifier(if is_selected {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                })),
                 row1,
             );
-            f.render_widget(
-                Paragraph::new(level_display).style(Style::default().fg(GB_LIGHT)),
-                row2,
-            );
+            f.render_widget(Paragraph::new(level_display), row2);
         }
     }
 
@@ -580,5 +604,45 @@ mod tests {
             assert_eq!(buf[(x, 1)].symbol(), "x");
             assert_eq!(buf[(x, 1)].fg, Color::Green);
         }
+    }
+
+    /// Bg of every cell inside the pen border, with the default roster still
+    /// loading (so the "Loading…" placeholders, which clear their area, are drawn).
+    fn pen_backgrounds(theme_name: crate::config::ThemeName) -> Vec<Color> {
+        let config = crate::config::GameConfig {
+            theme: theme_name,
+            ..Default::default()
+        };
+        let mut app = App::new(config, None);
+        let mut picker = Picker::halfblocks();
+        let area = Rect::new(0, 0, 120, 30);
+        let mut term = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        term.draw(|f| {
+            render_pen(f, area, &mut app, &mut picker);
+        })
+        .unwrap();
+        let buf = term.backend().buffer();
+        // Nameplates are included: their paper fill matches the ground in both themes.
+        let inner = Block::default().borders(Borders::ALL).inner(area);
+        inner.positions().map(|p| buf[p].bg).collect()
+    }
+
+    #[test]
+    fn gbc_pen_is_filled_including_cleared_sprite_areas() {
+        let ground = theme(crate::config::ThemeName::Gbc).ground;
+        assert!(
+            pen_backgrounds(crate::config::ThemeName::Gbc)
+                .iter()
+                .all(|&bg| bg == ground)
+        );
+    }
+
+    #[test]
+    fn terminal_pen_leaves_the_terminal_background() {
+        assert!(
+            pen_backgrounds(crate::config::ThemeName::Terminal)
+                .iter()
+                .all(|&bg| bg == Color::Reset)
+        );
     }
 }

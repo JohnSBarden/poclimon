@@ -9,6 +9,13 @@ for the diff.
 
 ## [Unreleased]
 
+### Changed
+- New Game Boy Color look: white dialog-style text boxes, a white pen with grass and flowers, and battle-HUD nameplates with a blue EXP bar.
+- Prefer your terminal's own colours? Set `theme = "terminal"` under `[display]` in `poclimon.toml`.
+
+### Fixed
+- Hopping creatures stay whole mid-jump instead of vanishing out of their sprite box.
+
 ## Earlier releases
 
 Notes for v0.6.3 and before are on the

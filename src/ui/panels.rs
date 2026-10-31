@@ -1,18 +1,19 @@
 use super::pen::render_pen;
-use super::theme::{GB_DARK, GB_DARKEST, GB_LIGHT, GB_LIGHTEST};
+use super::theme::theme;
 use crate::animation::AnimationState;
 use crate::app::{App, PromptMode};
 use crate::notification::NotifLevel;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph},
+    widgets::{Clear, Paragraph},
 };
 use ratatui_image::picker::Picker;
 
 pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) {
+    let t = theme(app.config.theme);
     let chunks = Layout::vertical([
         Constraint::Length(3), // Title bar
         Constraint::Min(10),   // Pen (shared creature canvas)
@@ -31,32 +32,22 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
     let title = Paragraph::new(Line::from(vec![
         Span::styled(
             "PoCLImon",
-            Style::default()
-                .fg(GB_LIGHTEST)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(t.title).add_modifier(Modifier::BOLD),
         ),
         Span::raw(" — "),
         Span::styled(
             format!("{} creatures", app.slots.len()),
-            Style::default().fg(GB_LIGHT),
+            Style::default().fg(t.ink),
         ),
         Span::styled(
             format!(" [selected: {selected_name}]"),
-            Style::default().fg(GB_DARK),
+            Style::default().fg(t.ink_muted),
         ),
     ]))
     .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Thick)
-            .border_style(Style::default().fg(GB_LIGHT))
-            .style(Style::default().bg(GB_DARKEST))
+        t.text_box()
             .title(format!("◆ PoCLImon {version} ◆"))
-            .title_style(
-                Style::default()
-                    .fg(GB_LIGHTEST)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            .title_style(Style::default().fg(t.ink).add_modifier(Modifier::BOLD)),
     );
     f.render_widget(title, chunks[0]);
 
@@ -75,13 +66,13 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
         .slots
         .get(app.selected)
         .map(|s| match s.animator.state() {
-            AnimationState::Idle => Color::Green,
-            AnimationState::Eating => Color::Yellow,
-            AnimationState::Sleeping => Color::Blue,
-            // Magenta distinguishes Playing from other states at a glance.
-            AnimationState::Playing => Color::Magenta,
+            AnimationState::Idle => t.hp_green,
+            AnimationState::Eating => t.hp_yellow,
+            AnimationState::Sleeping => t.exp_blue,
+            // Pink distinguishes Playing from other states at a glance.
+            AnimationState::Playing => t.psychic_pink,
         })
-        .unwrap_or(Color::White);
+        .unwrap_or(t.ink);
 
     // Shared pen — all creatures on one open canvas.
     let placements = render_pen(f, chunks[1], app, picker);
@@ -92,7 +83,7 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
     let mut first_line = vec![
         Span::styled(
             format!("{selected_name}: "),
-            Style::default().fg(GB_LIGHTEST),
+            Style::default().fg(t.ink).add_modifier(Modifier::BOLD),
         ),
         Span::styled(state_label, Style::default().fg(status_color)),
     ];
@@ -104,16 +95,16 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
     {
         first_line.push(Span::styled(
             "  ✨ Ready to evolve. Press [V]",
-            Style::default().fg(Color::Yellow),
+            Style::default().fg(t.hp_yellow),
         ));
     }
     let mut status_lines = vec![Line::from(first_line)];
     if let Some(evo) = app.evolution.as_ref() {
         status_lines.push(Line::from(vec![
-            Span::styled("[Evolve] ", Style::default().fg(Color::LightMagenta)),
+            Span::styled("[Evolve] ", Style::default().fg(t.psychic_pink)),
             Span::styled(
                 format!("What? {} is evolving!", evo.from_name),
-                Style::default().fg(Color::LightMagenta),
+                Style::default().fg(t.psychic_pink),
             ),
         ]));
     } else if let Some(transition) = app.swap_transition.as_ref() {
@@ -133,18 +124,18 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
             transition.target_name.clone()
         };
         status_lines.push(Line::from(vec![
-            Span::styled("[Swap]  ", Style::default().fg(Color::LightMagenta)),
+            Span::styled("[Swap]  ", Style::default().fg(t.psychic_pink)),
             Span::styled(
                 format!("{action} {display_name}..."),
-                Style::default().fg(Color::LightMagenta),
+                Style::default().fg(t.psychic_pink),
             ),
         ]));
     } else if let Some(transition) = app.add_transition.as_ref() {
         status_lines.push(Line::from(vec![
-            Span::styled("[Add]   ", Style::default().fg(Color::LightMagenta)),
+            Span::styled("[Add]   ", Style::default().fg(t.psychic_pink)),
             Span::styled(
                 format!("Loading {}...", transition.target_name),
-                Style::default().fg(Color::LightMagenta),
+                Style::default().fg(t.psychic_pink),
             ),
         ]));
     }
@@ -152,9 +143,9 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
     let notif_rows = if app.has_background_load() { 1 } else { 2 };
     for notif in app.notifications.iter().rev().take(notif_rows) {
         let (prefix, color) = match notif.level {
-            NotifLevel::Error => ("[Error] ", Color::Red),
-            NotifLevel::Warn => ("[Warn]  ", Color::Yellow),
-            NotifLevel::Info => ("[Info]  ", GB_DARK),
+            NotifLevel::Error => ("[Error] ", t.hp_red),
+            NotifLevel::Warn => ("[Warn]  ", t.hp_yellow),
+            NotifLevel::Info => ("[Info]  ", t.ink_muted),
         };
         status_lines.push(Line::from(vec![
             Span::styled(prefix, Style::default().fg(color)),
@@ -162,13 +153,7 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
         ]));
     }
 
-    let status = Paragraph::new(status_lines).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Thick)
-            .border_style(Style::default().fg(GB_LIGHT))
-            .style(Style::default().bg(GB_DARKEST)),
-    );
+    let status = Paragraph::new(status_lines).block(t.text_box());
     f.render_widget(status, chunks[2]);
 
     // Help bar
@@ -191,19 +176,11 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
         }
         help_spans.push(Span::styled(
             *key,
-            Style::default()
-                .fg(GB_LIGHTEST)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(t.ink).add_modifier(Modifier::BOLD),
         ));
-        help_spans.push(Span::styled(*action, Style::default().fg(GB_DARK)));
+        help_spans.push(Span::styled(*action, Style::default().fg(t.ink_muted)));
     }
-    let help = Paragraph::new(Line::from(help_spans)).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Thick)
-            .border_style(Style::default().fg(GB_LIGHT))
-            .style(Style::default().bg(GB_DARKEST)),
-    );
+    let help = Paragraph::new(Line::from(help_spans)).block(t.text_box());
     f.render_widget(help, chunks[3]);
 
     // Branch popup: one numbered line per species the creature can become.
@@ -215,11 +192,7 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
         let popup_y = chunks[1].y + (chunks[1].height.saturating_sub(popup_h)) / 2;
         let popup_area = Rect::new(popup_x, popup_y, popup_w, popup_h).intersection(chunks[1]);
         f.render_widget(Clear, popup_area);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(" Evolve into ")
-            .border_style(Style::default().fg(Color::Yellow))
-            .style(Style::default().bg(GB_DARKEST));
+        let block = t.text_box().title(" Evolve into ");
         let inner = block.inner(popup_area);
         f.render_widget(block, popup_area);
         let mut lines: Vec<Line> = app
@@ -228,15 +201,12 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
             .enumerate()
             .map(|(i, &id)| {
                 let name = crate::creatures::lookup_name(id).unwrap_or("???");
-                Line::styled(
-                    format!("[{}] {name}", i + 1),
-                    Style::default().fg(GB_LIGHTEST),
-                )
+                Line::styled(format!("[{}] {name}", i + 1), Style::default().fg(t.ink))
             })
             .collect();
         lines.push(Line::styled(
             "[Esc] cancel",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(t.ink_muted),
         ));
         f.render_widget(Paragraph::new(lines), inner);
     }
@@ -257,11 +227,7 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
         // Clear background (overwrite pen content in this area).
         f.render_widget(Clear, popup_area);
 
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(title)
-            .border_style(Style::default().fg(Color::Yellow))
-            .style(Style::default().bg(GB_DARKEST));
+        let block = t.text_box().title(title);
         let inner = block.inner(popup_area);
         f.render_widget(block, popup_area);
 
@@ -269,15 +235,14 @@ pub fn ui(f: &mut Frame<'_>, app: &mut App, picker: &mut Picker, version: &str) 
         let input_text = format!("Pokédex #: {}█", app.prompt_buffer);
         let row1 = Rect::new(inner.x, inner.y, inner.width, 1);
         f.render_widget(
-            Paragraph::new(input_text).style(Style::default().fg(GB_LIGHTEST)),
+            Paragraph::new(input_text).style(Style::default().fg(t.ink)),
             row1,
         );
 
         // Line 2: hint.
         let row2 = Rect::new(inner.x, inner.y + 1, inner.width, 1);
         f.render_widget(
-            Paragraph::new("[Enter] confirm  [Esc] cancel")
-                .style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new("[Enter] confirm  [Esc] cancel").style(Style::default().fg(t.ink_muted)),
             row2,
         );
     }

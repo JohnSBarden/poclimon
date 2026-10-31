@@ -74,6 +74,7 @@ poclimon --config ./my-roster.toml # custom config
 ```toml
 [display]
 scale = 3  # sprite scale multiplier, 1-8 — memory scales quadratically, 3 is the sweet spot
+theme = "gbc"  # "gbc": Game Boy Color, all white. "terminal": your terminal's own colours
 ```
 
 ### Your save

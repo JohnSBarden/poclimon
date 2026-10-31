@@ -11,13 +11,14 @@ ap.add_argument("binary"); ap.add_argument("protocol"); ap.add_argument("out")
 ap.add_argument("--cols", type=int, default=160); ap.add_argument("--rows", type=int, default=45)
 ap.add_argument("--script", default="full")
 ap.add_argument("--home", default=None)
+ap.add_argument("--theme", default="gbc", help="[display] theme to run with (gbc | terminal)")
 ap.add_argument("--no-dump", action="store_true", help="disable the frame dump (for CPU/perf numbers)")
 a = ap.parse_args()
 
 home = a.home or os.path.join(os.path.dirname(os.path.abspath(a.out)), "home")
 os.makedirs(os.path.join(home, ".config"), exist_ok=True)
 with open(os.path.join(home, ".config", "poclimon.toml"), "w") as f:
-    f.write('[display]\nscale = 3\n\n[roster]\ncreatures = ["pikachu", "eevee", "bulbasaur", "charmander", "squirtle", "jolteon"]\n')
+    f.write(f'[display]\nscale = 3\ntheme = "{a.theme}"\n\n[roster]\ncreatures = ["pikachu", "eevee", "bulbasaur", "charmander", "squirtle", "jolteon"]\n')
 
 def setsize(fd, rows, cols):
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
