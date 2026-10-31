@@ -98,7 +98,10 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Cargo.toml Cargo.lock CHANGELOG.md
-          git commit -m "chore(release): ${{ steps.bump.outputs.new_tag }} [skip ci]"
+          # No [skip ci]: GitHub would also skip the tag push, and the tag is what
+          # starts build-release.yml. This workflow re-runs on the release commit
+          # and stops at the empty Unreleased section.
+          git commit -m "chore(release): ${{ steps.bump.outputs.new_tag }}"
           git tag "${{ steps.bump.outputs.new_tag }}"
           git push origin main
           git push origin "${{ steps.bump.outputs.new_tag }}"
