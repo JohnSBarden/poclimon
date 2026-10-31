@@ -9,6 +9,8 @@ for the diff.
 
 ## [Unreleased]
 
+## [v0.7.0] - 2026-10-31
+
 ### Changed
 - New Game Boy Color look: white dialog-style text boxes, a white pen with grass and flowers, and battle-HUD nameplates with a blue EXP bar.
 - Prefer your terminal's own colours? Set `theme = "terminal"` under `[display]` in `poclimon.toml`.
