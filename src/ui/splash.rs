@@ -51,7 +51,7 @@ pub fn render_splash(f: &mut Frame<'_>) {
         })
         .collect();
 
-    let top_pad = area.height.saturating_sub(img_rows + 9) / 2;
+    let top_pad = area.height.saturating_sub(img_rows + 10) / 2;
     let chunks = Layout::vertical([
         Constraint::Length(top_pad),  // top padding
         Constraint::Length(img_rows), // logo
@@ -59,6 +59,7 @@ pub fn render_splash(f: &mut Frame<'_>) {
         Constraint::Length(1),        // version
         Constraint::Length(2),        // blank
         Constraint::Length(1),        // github handle
+        Constraint::Length(1),        // ko-fi
         Constraint::Length(1),        // blank
         Constraint::Length(1),        // trademark 1
         Constraint::Length(1),        // trademark 2
@@ -91,6 +92,13 @@ pub fn render_splash(f: &mut Frame<'_>) {
         chunks[5],
     );
 
+    f.render_widget(
+        Paragraph::new("☕ ko-fi.com/johnnycashmoney")
+            .style(Style::default().fg(Color::Gray))
+            .alignment(Alignment::Center),
+        chunks[6],
+    );
+
     for (i, text) in [
         "Pokemon and all related names are trademarks of",
         "Nintendo / Creatures Inc. / GAME FREAK inc.",
@@ -103,7 +111,7 @@ pub fn render_splash(f: &mut Frame<'_>) {
             Paragraph::new(*text)
                 .style(Style::default().fg(Color::DarkGray))
                 .alignment(Alignment::Center),
-            chunks[7 + i],
+            chunks[8 + i],
         );
     }
 }
