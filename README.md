@@ -1,6 +1,6 @@
 # PoCLImon
 
-![Screenshot](docs/img/title.png)
+![Screenshot](docs/img/v0.7.0.png)
 
 **Pokemon living in your terminal.** Eat, sleep, play. 🕹️
 
@@ -10,7 +10,7 @@
 poclimon
 ```
 
-![Screenshot](docs/img/v0.7.0.png)
+![Screenshot](docs/img/title.png)
 
 ---
 
