@@ -9,6 +9,12 @@ for the diff.
 
 ## [Unreleased]
 
+### Added
+- A Ko-fi link on the splash screen and in the README, for anyone who'd like to chip in: https://ko-fi.com/johnnycashmoney
+
+### Changed
+- The README screenshot now shows the current Game Boy Color look.
+
 ## [v0.7.0] - 2026-10-31
 
 ### Changed
