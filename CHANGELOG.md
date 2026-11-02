@@ -9,6 +9,8 @@ for the diff.
 
 ## [Unreleased]
 
+## [v0.7.1] - 2026-11-02
+
 ### Added
 - A Ko-fi link on the splash screen and in the README, for anyone who'd like to chip in: https://ko-fi.com/johnnycashmoney
 
