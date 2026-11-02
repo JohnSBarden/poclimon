@@ -10,7 +10,7 @@
 poclimon
 ```
 
-![Screenshot](docs/img/v0.2.2.png)
+![Screenshot](docs/img/v0.7.0.png)
 
 ---
 
