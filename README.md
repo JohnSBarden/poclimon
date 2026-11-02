@@ -4,6 +4,8 @@
 
 **Pokemon living in your terminal.** Eat, sleep, play. 🕹️
 
+[![Support on Ko-fi](https://img.shields.io/badge/Ko--fi-support-FF5E5B?logo=ko-fi&logoColor=white)](https://ko-fi.com/johnnycashmoney)
+
 ```
 poclimon
 ```
@@ -105,6 +107,12 @@ You start with Bulbasaur, Charmander, Squirtle, Pikachu and Eevee. Hit `A` to ad
 | iTerm2                    | iTerm2 inline     | It's super effective             |
 | WezTerm, foot             | Sixel             | Very effective                   |
 | Alacritty, macOS Terminal | Halfblock unicode | Not very effective, but it works |
+
+---
+
+## Support
+
+If poclimon made your terminal a little cosier, you can buy me a coffee on [Ko-fi](https://ko-fi.com/johnnycashmoney). ☕
 
 ---
 

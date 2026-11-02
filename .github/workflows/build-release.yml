@@ -95,6 +95,7 @@ jobs:
             f
           ' CHANGELOG.md > release-notes.md
           if grep -q '[^[:space:]]' release-notes.md; then
+            printf '\n---\n\n☕ Enjoying poclimon? [Support it on Ko-fi](https://ko-fi.com/johnnycashmoney).\n' >> release-notes.md
             echo "found=true" >> "$GITHUB_OUTPUT"
           else
             echo "::warning::No CHANGELOG.md section for $TAG; using generated notes"
